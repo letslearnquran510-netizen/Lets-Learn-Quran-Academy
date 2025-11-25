@@ -86,11 +86,12 @@ app.get('/', (req, res) => {
 // ---------------------------------------------------------
 const config = {
     twilio: {
-        accountSid: process.env.TWILIO_ACCOUNT_SID,
-        authToken: process.env.TWILIO_AUTH_TOKEN,
-        phoneNumber: process.env.TWILIO_PHONE_NUMBER,
+        // Trim whitespace that might have been accidentally copied
+        accountSid: (process.env.TWILIO_ACCOUNT_SID || '').trim(),
+        authToken: (process.env.TWILIO_AUTH_TOKEN || '').trim(),
+        phoneNumber: (process.env.TWILIO_PHONE_NUMBER || '').trim(),
     },
-    publicUrl: process.env.PUBLIC_URL || 'http://localhost:3000',
+    publicUrl: (process.env.PUBLIC_URL || 'http://localhost:3000').trim(),
     jwtSecret: process.env.JWT_SECRET || 'your-secret-key-change-in-production',
     encryptionKey: process.env.ENCRYPTION_KEY || 'your-encryption-key-32-chars-min',
     database: {
@@ -110,12 +111,20 @@ if (!config.twilio.accountSid || !config.twilio.authToken || !config.twilio.phon
     console.error('\n⚠️ Server will run in SIMULATION mode (no real calls)');
 } else {
     console.log('✅ Twilio Credentials Loaded:');
-    console.log('   Account SID: ' + config.twilio.accountSid.substring(0, 8) + '...');
+    console.log('   Account SID: ' + config.twilio.accountSid.substring(0, 8) + '...' + config.twilio.accountSid.substring(config.twilio.accountSid.length - 4));
+    console.log('   Auth Token Length: ' + config.twilio.authToken.length + ' chars');
     console.log('   Phone Number: ' + config.twilio.phoneNumber);
 }
 
-const twilio_client = config.twilio.accountSid ? 
-    twilio(config.twilio.accountSid, config.twilio.authToken) : null;
+let twilio_client = null;
+try {
+    if (config.twilio.accountSid && config.twilio.authToken) {
+        twilio_client = twilio(config.twilio.accountSid, config.twilio.authToken);
+        console.log('✅ Twilio client initialized successfully');
+    }
+} catch (initError) {
+    console.error('❌ Failed to initialize Twilio client:', initError.message);
+}
 
 // ---------------------------------------------------------
 // 📊 IN-MEMORY DATABASE
@@ -452,6 +461,10 @@ app.post('/api/calls/initiate', verifyToken, async (req, res) => {
             } catch (error) {
                 callError = error.message;
                 console.error(`❌ Twilio Error: ${error.message}`);
+                console.error(`   Error Code: ${error.code || 'N/A'}`);
+                console.error(`   Error Status: ${error.status || 'N/A'}`);
+                console.error(`   More Info: ${error.moreInfo || 'N/A'}`);
+                console.error(`   Full Error:`, JSON.stringify(error, null, 2));
                 callSid = 'sim_' + Date.now();
             }
         } else {

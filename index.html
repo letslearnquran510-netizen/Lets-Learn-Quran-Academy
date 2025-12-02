@@ -865,6 +865,10 @@
     </div>
     
     <script>
+        // VERSION 4.0 - Real-time sync with aggressive fallbacks
+        const APP_VERSION = '4.0';
+        console.log('🚀 Quran Academy Dialer v' + APP_VERSION + ' loaded');
+        
         const APP = {
             config: {
                 adminPass: 'admin123',
@@ -1001,39 +1005,45 @@
                     return;
                 }
                 
-                console.log('📡 WebSocket message received:', msg.type, msg.data);
+                console.log('📡 WS MSG:', msg.type);
                 
                 switch(msg.type) {
                     case 'CONNECTED':
-                        console.log('✅ WebSocket connection confirmed');
+                        console.log('✅ WebSocket connected');
                         break;
+                        
                     case 'CALL_STATE_CHANGED':
-                        console.log(`📞 Call state: ${msg.data.status} for ${msg.data.studentName}`);
-                        this.updateCallState(msg.data);
+                        if (this.state.callActive && msg.data) {
+                            console.log('📞 State changed:', msg.data.status);
+                        }
                         break;
+                        
                     case 'CALL_ENDED':
-                        console.log(`📞 Call ended by: ${msg.data.endedBy} for ${msg.data.studentName}`);
-                        // If we have ANY active call, end it when we receive CALL_ENDED
+                        console.log('📞 CALL_ENDED received - ending active call NOW');
+                        // ALWAYS end active call when we receive CALL_ENDED
                         if (this.state.callActive) {
-                            this.handleCallEnded(msg.data);
+                            this.forceEndActiveCall(msg.data?.duration || 0);
                         }
                         break;
+                        
                     case 'CALL_FAILED':
-                        console.log(`❌ Call failed: ${msg.data.reason} for ${msg.data.studentName}`);
+                        console.log('❌ CALL_FAILED received');
                         if (this.state.callActive) {
-                            this.handleCallFailed(msg.data);
+                            this.forceEndActiveCall(0);
                         }
                         break;
+                        
                     case 'CALL_CONNECTED':
-                        console.log(`✅ Call connected for ${msg.data.studentName}`);
-                        if (this.state.callActive) {
-                            this.handleCallConnected(msg.data);
+                        if (this.state.callActive && this.state.callData) {
+                            this.state.callData.status = 'active';
+                            document.getElementById('callStatusText').textContent = 'Connected';
+                            document.getElementById('callStatusIndicator').className = 'status-indicator status-active';
                         }
                         break;
+                        
                     case 'STUDENT_ADDED':
                     case 'STUDENT_UPDATED':
                     case 'STUDENT_DELETED':
-                        console.log('👥 Student list changed - reloading');
                         this.loadStudents();
                         break;
                 }
@@ -1108,19 +1118,39 @@
             },
             
             forceEndActiveCall(duration) {
-                if (!this.state.callActive || !this.state.callData) return;
+                console.log('🔴 FORCE END CALL - Active:', this.state.callActive);
                 
-                console.log('🔄 Force ending active call');
-                this.state.callData.status = 'ended';
+                if (!this.state.callActive) {
+                    console.log('ℹ️ No active call to end');
+                    return;
+                }
+                
+                // Stop everything
                 this.state.callActive = false;
                 this.stopCallTimer();
                 
-                document.getElementById('callStatusText').textContent = 'Call Ended';
-                document.getElementById('callStatusIndicator').className = 'status-indicator status-ended';
-                document.getElementById('btnEndCall').disabled = true;
-                this.updateCallUI();
+                if (this.state.callData) {
+                    this.state.callData.status = 'ended';
+                }
+                
+                // Update UI
+                try {
+                    document.getElementById('callStatusText').textContent = 'Call Ended';
+                    document.getElementById('callStatusIndicator').className = 'status-indicator status-ended';
+                    document.getElementById('btnEndCall').disabled = true;
+                    document.getElementById('callInfo').textContent = `Status: ENDED | Duration: ${duration}s`;
+                } catch(e) {
+                    console.error('UI update error:', e);
+                }
+                
                 this.showAlert(`✅ Call ended - Duration: ${duration}s`, 'success');
-                setTimeout(() => this.closeCallModal(), 2000);
+                
+                // Close modal after delay
+                setTimeout(() => {
+                    this.closeCallModal();
+                }, 2000);
+                
+                console.log('✅ Call ended successfully');
             },
             
             handleCallFailed(data) {
@@ -1631,10 +1661,8 @@
                     
                     try {
                         const callId = this.state.callData.callId;
-                        console.log('📊 Polling call status for:', callId);
                         
                         if (!callId || callId.startsWith('call_') || callId.startsWith('sim_')) {
-                            console.log('⚠️ Skipping poll - offline/simulated call');
                             return;
                         }
                         
@@ -1646,18 +1674,18 @@
                         
                         if (res.ok) {
                             const callData = await res.json();
-                            console.log('📊 Poll result - Call status:', callData.status);
+                            console.log('📊 POLL RESULT:', callData.status, '| Active:', this.state.callActive);
                             
-                            // If call is completed but UI still shows active, update it
-                            if (callData.status === 'completed' && this.state.callActive) {
-                                console.log('🔄 Fallback: Updating call status from poll');
+                            // Check for ANY status that means call ended
+                            const endedStatuses = ['completed', 'busy', 'no-answer', 'failed', 'canceled'];
+                            
+                            if (endedStatuses.includes(callData.status) && this.state.callActive) {
+                                console.log('🔄 POLL DETECTED CALL ENDED - Forcing UI update');
                                 this.forceEndActiveCall(callData.duration || 0);
                             }
-                        } else {
-                            console.log('⚠️ Poll response not ok:', res.status);
                         }
                     } catch (e) {
-                        console.log('⚠️ Poll check failed:', e.message);
+                        // Silent fail
                     }
                 }, 2000);
             },

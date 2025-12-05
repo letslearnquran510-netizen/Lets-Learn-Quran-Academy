@@ -1080,6 +1080,12 @@
 
         // --- REAL BACKEND API ---
         const BACKEND_URL = window.location.hostname === 'localhost' ? 'http://localhost:3000' : window.location.origin;
+        const WS_URL = window.location.hostname === 'localhost' 
+            ? 'ws://localhost:3000' 
+            : `${window.location.protocol === 'https:' ? 'wss:' : 'ws:'}//${window.location.host}`;
+
+        console.log('🌐 Backend URL:', BACKEND_URL);
+        console.log('🔌 WebSocket URL:', WS_URL);
 
         const api = {
             makeCall: async (to, name) => {
@@ -1097,9 +1103,6 @@
             getStatus: async (sid) => {
                 const response = await fetch(`${BACKEND_URL}/call-status/${sid}`);
                 if (!response.ok) {
-                    // Any non-OK response, including 404, will be treated as a temporary polling failure.
-                    // This prevents the UI from prematurely ending the call if the call SID hasn't propagated to the backend yet.
-                    // The polling mechanism will retry a few times before giving up.
                     const errorData = await response.json().catch(() => ({ error: `Server returned status ${response.status}` }));
                     throw new Error(errorData.error || `HTTP error! status: ${response.status}`);
                 }
@@ -1112,8 +1115,6 @@
                     body: JSON.stringify({ sid })
                 });
                 if (!response.ok) {
-                    // If the call is not found (404), it's likely already been terminated by the other party or the system.
-                    // We can treat this as a successful hangup from the client's perspective to avoid unnecessary errors.
                     if (response.status === 404) {
                         console.warn(`Hangup for SID ${sid} returned 404. Assuming call already ended.`);
                         return { success: true, status: 'completed' };
@@ -1124,6 +1125,102 @@
                 return response.json();
             }
         };
+
+        // --- WEBSOCKET MANAGER FOR REAL-TIME UPDATES ---
+        const createWebSocketManager = () => {
+            let ws = null;
+            let reconnectTimeout = null;
+            let pingInterval = null;
+            let onStatusUpdate = null;
+            let subscribedCallSid = null;
+            let isConnected = false;
+
+            const connect = () => {
+                if (ws && ws.readyState === WebSocket.OPEN) return;
+                
+                try {
+                    console.log('🔌 Connecting to WebSocket...');
+                    ws = new WebSocket(WS_URL);
+                    
+                    ws.onopen = () => {
+                        console.log('✅ WebSocket connected');
+                        isConnected = true;
+                        
+                        // Start keepalive ping
+                        pingInterval = setInterval(() => {
+                            if (ws && ws.readyState === WebSocket.OPEN) {
+                                ws.send(JSON.stringify({ type: 'PING' }));
+                            }
+                        }, 25000);
+                        
+                        // Re-subscribe if we have a call
+                        if (subscribedCallSid) {
+                            ws.send(JSON.stringify({ type: 'SUBSCRIBE_CALL', callSid: subscribedCallSid }));
+                        }
+                    };
+                    
+                    ws.onmessage = (event) => {
+                        try {
+                            const data = JSON.parse(event.data);
+                            console.log('📡 WS Message:', data.type, data.status || '');
+                            
+                            if (data.type === 'CALL_STATUS_UPDATE' && onStatusUpdate) {
+                                onStatusUpdate(data);
+                            }
+                        } catch (e) {
+                            console.error('WS message parse error:', e);
+                        }
+                    };
+                    
+                    ws.onclose = () => {
+                        console.log('🔌 WebSocket disconnected');
+                        isConnected = false;
+                        if (pingInterval) clearInterval(pingInterval);
+                        
+                        // Reconnect after 3 seconds
+                        reconnectTimeout = setTimeout(() => connect(), 3000);
+                    };
+                    
+                    ws.onerror = (err) => {
+                        console.error('WebSocket error:', err);
+                    };
+                } catch (e) {
+                    console.error('WebSocket connection error:', e);
+                    reconnectTimeout = setTimeout(() => connect(), 3000);
+                }
+            };
+            
+            const subscribeToCall = (callSid) => {
+                subscribedCallSid = callSid;
+                if (ws && ws.readyState === WebSocket.OPEN) {
+                    ws.send(JSON.stringify({ type: 'SUBSCRIBE_CALL', callSid }));
+                    console.log('📡 Subscribed to call:', callSid);
+                }
+            };
+            
+            const unsubscribe = () => {
+                subscribedCallSid = null;
+            };
+            
+            const setStatusHandler = (handler) => {
+                onStatusUpdate = handler;
+            };
+            
+            const disconnect = () => {
+                if (reconnectTimeout) clearTimeout(reconnectTimeout);
+                if (pingInterval) clearInterval(pingInterval);
+                if (ws) ws.close();
+                ws = null;
+                isConnected = false;
+            };
+            
+            const getIsConnected = () => isConnected;
+            
+            return { connect, subscribeToCall, unsubscribe, setStatusHandler, disconnect, getIsConnected };
+        };
+
+        // Global WebSocket manager instance
+        const wsManager = createWebSocketManager();
 
 
         const App = () => {
@@ -1410,6 +1507,50 @@
             const callStateRef = useRef(callState);
             useEffect(() => { callStateRef.current = callState; }, [callState]);
 
+            // Ref to hold handleCallEnd for WebSocket callback
+            const handleCallEndRef = useRef(null);
+
+            // --- WebSocket Connection for Real-Time Updates ---
+            useEffect(() => {
+                console.log('🔌 Setting up WebSocket connection...');
+                wsManager.connect();
+                
+                // Set up the status update handler
+                wsManager.setStatusHandler((data) => {
+                    console.log('📡 WebSocket status update:', data);
+                    
+                    const currentState = callStateRef.current;
+                    
+                    // Only process if we have an active call matching this SID
+                    if (currentState.sid && currentState.sid === data.callSid) {
+                        const terminalStatuses = ['completed', 'busy', 'no-answer', 'canceled', 'failed'];
+                        
+                        if (terminalStatuses.includes(data.status)) {
+                            console.log('🔴 REAL-TIME: Call ended via WebSocket!', data.status);
+                            
+                            // Call handleCallEnd immediately
+                            if (handleCallEndRef.current) {
+                                handleCallEndRef.current({
+                                    finalStatus: data.status,
+                                    finalDuration: data.duration || currentState.duration,
+                                    recordingUrl: data.recordingUrl,
+                                    manual: false
+                                });
+                            }
+                        } else if (data.status === 'in-progress' && currentState.status === 'dialing') {
+                            console.log('✅ REAL-TIME: Call connected via WebSocket!');
+                            setCallState(s => ({...s, status: 'active'}));
+                            audioManager.stop();
+                        }
+                    }
+                });
+                
+                // Cleanup on unmount
+                return () => {
+                    wsManager.disconnect();
+                };
+            }, []);
+
             // --- Call Lifecycle Management ---
             const stopTimer = useCallback(() => {
                 if (timerRef.current) clearInterval(timerRef.current);
@@ -1432,6 +1573,7 @@
                 stopTimeout();
                 audioManager.stop();
                 window.speechSynthesis.cancel();
+                wsManager.unsubscribe(); // Unsubscribe from WebSocket call updates
                 if (mediaStreamRef.current) {
                     mediaStreamRef.current.getTracks().forEach(track => track.stop());
                     mediaStreamRef.current = null;
@@ -1444,9 +1586,16 @@
             }, [setCallHistory]);
 
             const handleCallEnd = useCallback(({ finalStatus, finalDuration, recordingUrl, manual = false }) => {
-                if (callStateRef.current.status === 'finished') return;
+                console.log('📞 handleCallEnd called:', { finalStatus, finalDuration, manual });
+                console.log('   Current status:', callStateRef.current.status);
                 
-                setCallState(s => ({ ...s, status: 'finishing' }));
+                // Only skip if already completely finished
+                if (callStateRef.current.status === 'finished') {
+                    console.log('   ⏭️ Already finished, skipping');
+                    return;
+                }
+                
+                // Stop all timers and audio immediately
                 callCleanup();
 
                 if (finalStatus === 'busy') {
@@ -1454,6 +1603,7 @@
                 }
 
                 if (!callStateRef.current.student) {
+                    console.log('   ❌ No student found, forcing finish');
                     setCallState(s => ({ ...s, status: 'finished', finishReason: 'Error: Student not found' }));
                     return;
                 }
@@ -1493,40 +1643,60 @@
                         break;
                 }
 
+                // Add to history
                 addCallToHistory({
                     studentName, status: historyStatus, duration: finalDuration,
                     teacherName: user.name, timestamp: new Date().toISOString(),
                     recordingUrl: user.type === 'admin' ? recordingUrl : null
                 });
                 
+                // Show toast notification
                 addToast(toastMessage, toastType);
+                
+                // Set to finished - this will hide the modal
+                console.log('   ✅ Setting status to finished');
                 setCallState(s => ({ ...s, status: 'finished', duration: finalDuration, finishReason: summaryMessage, sid: null }));
             }, [addToast, callCleanup, user.name, user.type, addCallToHistory]);
 
+            // Store handleCallEnd in ref so WebSocket can call it
+            useEffect(() => {
+                handleCallEndRef.current = handleCallEnd;
+            }, [handleCallEnd]);
+
             const requestCallEnd = useCallback(async () => {
-                if (['finishing', 'finished'].includes(callStateRef.current.status)) return;
+                console.log('🔴 requestCallEnd called, current status:', callStateRef.current.status);
+                
+                if (callStateRef.current.status === 'finished') {
+                    console.log('   Already finished, skipping');
+                    return;
+                }
             
                 const currentSid = callStateRef.current.sid;
-                if (!currentSid) {
-                     handleCallEnd({ finalStatus: 'canceled', finalDuration: 0, recordingUrl: null, manual: true });
-                     return;
-                }
+                const currentDuration = callStateRef.current.duration;
                 
-                setCallState(s => ({ ...s, status: 'finishing' }));
+                // Stop polling and cleanup immediately
                 callCleanup();
+                
+                if (!currentSid) {
+                    console.log('   No SID, ending as canceled');
+                    handleCallEnd({ finalStatus: 'canceled', finalDuration: 0, recordingUrl: null, manual: true });
+                    return;
+                }
             
                 try {
+                    console.log('   Calling hangup API...');
                     const data = await api.hangup(currentSid);
+                    console.log('   Hangup response:', data);
                     handleCallEnd({
                         finalStatus: data.status || 'completed',
-                        finalDuration: data.duration !== undefined ? data.duration : callStateRef.current.duration,
+                        finalDuration: data.duration !== undefined ? data.duration : currentDuration,
                         recordingUrl: data.recordingUrl,
                         manual: true,
                     });
                 } catch (err) {
                     console.error("Hangup error:", err);
                     addToast("Failed to end call cleanly, but UI is reset.", 'error');
-                    handleCallEnd({ finalStatus: 'completed', finalDuration: callStateRef.current.duration, recordingUrl: null, manual: true });
+                    handleCallEnd({ finalStatus: 'completed', finalDuration: currentDuration, recordingUrl: null, manual: true });
                 }
             }, [handleCallEnd, addToast, callCleanup]);
             
@@ -1570,6 +1740,11 @@
                 try {
                     const data = await api.makeCall(student.phone, student.name);
                     if (!data.success || !data.callSid) throw new Error(data.error || 'Failed to initiate call.');
+                    
+                    // Subscribe to WebSocket updates for this call
+                    wsManager.subscribeToCall(data.callSid);
+                    console.log('📡 Subscribed to real-time updates for call:', data.callSid);
+                    
                     setCallState(s => ({ ...s, sid: data.callSid }));
                 } catch (err) {
                     console.error("Call initiation error:", err);
@@ -1602,15 +1777,23 @@
                 return stopTimer;
             }, [callState.status, callState.isHoldActive, stopTimer]);
 
-            // Polling effect
+            // Polling effect - FALLBACK mechanism (WebSocket is primary)
+            // Polls every 3 seconds as backup in case WebSocket disconnects
             useEffect(() => {
                 if (callState.sid && (callState.status === 'dialing' || callState.status === 'active')) {
+                    console.log('🔄 Starting fallback poll for call:', callState.sid);
+                    
                     pollIntervalRef.current = setInterval(async () => {
                         try {
                             const data = await api.getStatus(callState.sid);
                             pollFailuresRef.current = 0;
                             
-                            if (data.status === 'in-progress' && callStateRef.current.status === 'dialing') {
+                            // Only log if status changed or important
+                            const currentStatus = callStateRef.current.status;
+                            
+                            // Handle call connected (if WebSocket missed it)
+                            if (data.status === 'in-progress' && currentStatus === 'dialing') {
+                                console.log('✅ Call connected (via poll fallback)');
                                 stopTimeout(); 
                                 audioManager.stop();
                                 setCallState(s => ({...s, status: 'active'}));
@@ -1627,17 +1810,32 @@
                                 }
                             }
                             
+                            // Handle call ended - detect terminal statuses (if WebSocket missed it)
                             const terminalStatuses = ['completed', 'busy', 'no-answer', 'canceled', 'failed'];
-                            if (terminalStatuses.includes(data.status)) {
-                                handleCallEnd({ finalStatus: data.status, finalDuration: data.duration, recordingUrl: data.recordingUrl });
+                            if (terminalStatuses.includes(data.status) && currentStatus !== 'finished') {
+                                console.log('🔴 Call ended detected via poll fallback:', data.status);
+                                // Stop polling immediately
+                                if (pollIntervalRef.current) {
+                                    clearInterval(pollIntervalRef.current);
+                                    pollIntervalRef.current = null;
+                                }
+                                // Force end the call
+                                handleCallEnd({ 
+                                    finalStatus: data.status, 
+                                    finalDuration: data.duration || callStateRef.current.duration, 
+                                    recordingUrl: data.recordingUrl,
+                                    manual: false
+                                });
                             }
                         } catch (err) {
+                            console.error('Poll error:', err);
                             pollFailuresRef.current++;
-                            if (pollFailuresRef.current >= 3) {
+                            if (pollFailuresRef.current >= 5) {
+                                console.log('❌ Too many poll failures, ending call');
                                 requestCallEnd();
                             }
                         }
-                    }, 2000); // Increased polling interval to 2 seconds for stability
+                    }, 3000); // Poll every 3 seconds as FALLBACK (WebSocket is primary)
                 }
                 return stopPolling;
             }, [callState.sid, callState.status, stopPolling, stopTimeout, addToast, handleCallEnd, requestCallEnd]);
@@ -1694,7 +1892,7 @@
                             </div>
                         </div>
                     </main>
-                    {['dialing', 'active', 'finishing'].includes(callState.status) && callState.student && (
+                    {['dialing', 'active'].includes(callState.status) && callState.student && (
                         <FloatingCallModal 
                             user={user}
                             callState={callState}

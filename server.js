@@ -199,19 +199,68 @@ app.post('/make-call', async (req, res) => {
 });
 
 // GET /call-status/:sid - Get call status
+// ALWAYS checks Twilio directly for active calls to catch hangups immediately
 app.get('/call-status/:sid', async (req, res) => {
     const { sid } = req.params;
     
-    // First check our local cache
     const cachedCall = activeCalls.get(sid);
     
+    // For active/in-progress calls, ALWAYS check Twilio directly
+    // This catches hangups faster than waiting for webhooks
+    if (twilioClient && cachedCall && (cachedCall.status === 'in-progress' || cachedCall.status === 'ringing' || cachedCall.status === 'queued' || cachedCall.status === 'initiated')) {
+        try {
+            const call = await twilioClient.calls(sid).fetch();
+            const twilioStatus = call.status;
+            
+            // If Twilio shows a terminal status, update cache and broadcast immediately
+            const terminalStatuses = ['completed', 'busy', 'no-answer', 'canceled', 'failed'];
+            if (terminalStatuses.includes(twilioStatus) && !terminalStatuses.includes(cachedCall.status)) {
+                console.log('🔴 DETECTED: Call ended via Twilio API check!', twilioStatus);
+                
+                const duration = parseInt(call.duration) || cachedCall.duration || 0;
+                cachedCall.status = twilioStatus;
+                cachedCall.duration = duration;
+                
+                // Broadcast immediately!
+                broadcastCallStatus(sid, twilioStatus, duration, cachedCall.recordingUrl);
+                
+                return res.json({
+                    status: twilioStatus,
+                    duration: duration,
+                    recordingUrl: cachedCall.recordingUrl
+                });
+            }
+            
+            // Update cache with latest Twilio status
+            if (twilioStatus !== cachedCall.status) {
+                cachedCall.status = twilioStatus;
+                if (twilioStatus === 'in-progress' && !cachedCall.answeredTime) {
+                    cachedCall.answeredTime = Date.now();
+                }
+            }
+            
+            // Calculate duration if call is active
+            if (cachedCall.status === 'in-progress' && cachedCall.answeredTime) {
+                cachedCall.duration = Math.floor((Date.now() - cachedCall.answeredTime) / 1000);
+            }
+            
+            return res.json({
+                status: cachedCall.status,
+                duration: cachedCall.duration,
+                recordingUrl: cachedCall.recordingUrl
+            });
+            
+        } catch (error) {
+            console.error('Twilio status check error:', error.message);
+            // Fall through to cache
+        }
+    }
+    
+    // Return cached status for non-active calls
     if (cachedCall) {
-        // Calculate duration if call is active
         if (cachedCall.status === 'in-progress' && cachedCall.answeredTime) {
             cachedCall.duration = Math.floor((Date.now() - cachedCall.answeredTime) / 1000);
         }
-        
-        console.log('📊 Status check:', sid.substring(0, 10) + '...', '→', cachedCall.status);
         
         return res.json({
             status: cachedCall.status,
@@ -305,19 +354,21 @@ app.post('/hangup-call', async (req, res) => {
 // TWIML ENDPOINTS - Voice instructions for calls
 // ---------------------------------------------------------
 
-// TwiML for outbound calls - plays message when callee answers
+// TwiML for outbound calls - This plays when the CALLEE answers
+// The actual connection happens through Twilio's call bridging
 app.post('/twiml/outbound', (req, res) => {
-    console.log('📞 TwiML requested for outbound call');
-    console.log('   Called:', req.body.Called);
-    console.log('   From:', req.body.From);
+    const { To, From, CallSid } = req.body;
+    console.log('📞 TwiML requested');
+    console.log('   CallSid:', CallSid);
+    console.log('   To:', To);
+    console.log('   From:', From);
     
-    // Simple TwiML that plays when call is answered
-    // Recording is handled by the record=true parameter in the API call
+    // This TwiML plays to the person being called (student)
+    // It announces the call and then keeps the line open
     const twiml = `<?xml version="1.0" encoding="UTF-8"?>
 <Response>
-    <Say voice="alice">Hello, this is a call from Quran Academy.</Say>
-    <Pause length="60"/>
-    <Say voice="alice">Thank you for your time. Goodbye.</Say>
+    <Say voice="alice">You have a call from Quran Academy. Please hold.</Say>
+    <Pause length="120"/>
 </Response>`;
     
     res.type('text/xml');
@@ -555,6 +606,7 @@ app.post('/webhooks/call-status', (req, res) => {
     console.log('   SID:', CallSid);
     console.log('   Status:', CallStatus);
     console.log('   Duration:', CallDuration || 0);
+    console.log('   Time:', new Date().toISOString());
     console.log('='.repeat(50));
     
     // Update our local cache
@@ -563,6 +615,7 @@ app.post('/webhooks/call-status', (req, res) => {
     
     if (cachedCall) {
         cachedCall.status = CallStatus;
+        cachedCall.lastUpdate = Date.now();
         
         if (CallStatus === 'in-progress' && !cachedCall.answeredTime) {
             cachedCall.answeredTime = Date.now();

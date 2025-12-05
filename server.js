@@ -8,6 +8,7 @@ const twilio = require('twilio');
 const cors = require('cors');
 const path = require('path');
 const http = require('http');
+const https = require('https');
 const WebSocket = require('ws');
 require('dotenv').config();
 
@@ -64,6 +65,7 @@ try {
 // IN-MEMORY CALL STORAGE
 // ---------------------------------------------------------
 const activeCalls = new Map();
+const recordingsMap = new Map(); // Store recordings separately for history lookups
 
 // ---------------------------------------------------------
 // WEBSOCKET MANAGEMENT
@@ -140,6 +142,7 @@ app.post('/make-call', async (req, res) => {
     console.log('📞 INITIATING CALL');
     console.log('   To:', to);
     console.log('   Name:', name);
+    console.log('   Record:', record);
     console.log('='.repeat(50));
     
     if (!to) {
@@ -152,10 +155,12 @@ app.post('/make-call', async (req, res) => {
     
     try {
         const call = await twilioClient.calls.create({
-            url: 'http://demo.twilio.com/docs/voice.xml',
+            url: `${config.publicUrl}/twiml/outbound`,
             to: to,
             from: config.twilio.phoneNumber,
-            record: record || false,
+            record: true, // Always record calls
+            recordingStatusCallback: `${config.publicUrl}/webhooks/recording-status`,
+            recordingStatusCallbackEvent: ['completed'],
             statusCallback: `${config.publicUrl}/webhooks/call-status`,
             statusCallbackEvent: ['initiated', 'ringing', 'answered', 'completed'],
             statusCallbackMethod: 'POST'
@@ -169,7 +174,8 @@ app.post('/make-call', async (req, res) => {
             status: 'initiated',
             duration: 0,
             startTime: Date.now(),
-            recordingUrl: null
+            recordingUrl: null,
+            recordingSid: null
         });
         
         console.log('✅ Call created - SID:', call.sid);
@@ -296,6 +302,249 @@ app.post('/hangup-call', async (req, res) => {
 });
 
 // ---------------------------------------------------------
+// TWIML ENDPOINTS - Voice instructions for calls
+// ---------------------------------------------------------
+
+// TwiML for outbound calls - plays message when callee answers
+app.post('/twiml/outbound', (req, res) => {
+    console.log('📞 TwiML requested for outbound call');
+    console.log('   Called:', req.body.Called);
+    console.log('   From:', req.body.From);
+    
+    // Simple TwiML that plays when call is answered
+    // Recording is handled by the record=true parameter in the API call
+    const twiml = `<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+    <Say voice="alice">Hello, this is a call from Quran Academy.</Say>
+    <Pause length="60"/>
+    <Say voice="alice">Thank you for your time. Goodbye.</Say>
+</Response>`;
+    
+    res.type('text/xml');
+    res.send(twiml);
+});
+
+// TwiML that keeps the call open for conversation
+app.all('/twiml/conference', (req, res) => {
+    console.log('📞 TwiML conference requested');
+    
+    // Use a conference to allow real two-way conversation
+    const conferenceName = `call-${Date.now()}`;
+    const twiml = `<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+    <Say voice="alice">You are now connected.</Say>
+    <Dial>
+        <Conference startConferenceOnEnter="true" endConferenceOnExit="true" record="record-from-start">
+            ${conferenceName}
+        </Conference>
+    </Dial>
+</Response>`;
+    
+    res.type('text/xml');
+    res.send(twiml);
+});
+
+// ---------------------------------------------------------
+// RECORDING WEBHOOK - Captures recording URL when ready
+// ---------------------------------------------------------
+app.post('/webhooks/recording-status', async (req, res) => {
+    const { 
+        RecordingSid, 
+        RecordingUrl, 
+        RecordingStatus, 
+        RecordingDuration,
+        CallSid 
+    } = req.body;
+    
+    console.log('\n' + '='.repeat(50));
+    console.log('🎙️ RECORDING WEBHOOK RECEIVED');
+    console.log('   Recording SID:', RecordingSid);
+    console.log('   Call SID:', CallSid);
+    console.log('   Status:', RecordingStatus);
+    console.log('   Duration:', RecordingDuration);
+    console.log('   URL:', RecordingUrl);
+    console.log('='.repeat(50));
+    
+    if (RecordingStatus === 'completed' && RecordingUrl) {
+        // Add .mp3 extension for playback
+        const playableUrl = RecordingUrl + '.mp3';
+        
+        // Update our local cache
+        const cachedCall = activeCalls.get(CallSid);
+        if (cachedCall) {
+            cachedCall.recordingUrl = playableUrl;
+            cachedCall.recordingSid = RecordingSid;
+            console.log('✅ Recording URL saved for call:', CallSid);
+        }
+        
+        // Store recording in a separate map for history lookups
+        recordingsMap.set(CallSid, {
+            sid: RecordingSid,
+            url: playableUrl,
+            duration: parseInt(RecordingDuration) || 0,
+            timestamp: Date.now()
+        });
+        
+        // Broadcast recording available
+        broadcastCallStatus(CallSid, 'recording-ready', parseInt(RecordingDuration) || 0, playableUrl);
+    }
+    
+    res.status(200).send('OK');
+});
+
+// GET /recording/:callSid - Get recording for a call
+app.get('/recording/:callSid', async (req, res) => {
+    const { callSid } = req.params;
+    
+    console.log('🎙️ Recording requested for call:', callSid);
+    
+    // Check local cache first
+    const cachedRecording = recordingsMap.get(callSid);
+    if (cachedRecording && cachedRecording.url) {
+        console.log('   Found in cache:', cachedRecording.url);
+        return res.json({
+            success: true,
+            recordingUrl: cachedRecording.url,
+            duration: cachedRecording.duration
+        });
+    }
+    
+    // Check active calls cache
+    const cachedCall = activeCalls.get(callSid);
+    if (cachedCall && cachedCall.recordingUrl) {
+        console.log('   Found in active calls:', cachedCall.recordingUrl);
+        return res.json({
+            success: true,
+            recordingUrl: cachedCall.recordingUrl,
+            duration: cachedCall.duration
+        });
+    }
+    
+    // Try to fetch from Twilio API
+    if (twilioClient) {
+        try {
+            const recordings = await twilioClient.recordings.list({
+                callSid: callSid,
+                limit: 1
+            });
+            
+            if (recordings.length > 0) {
+                const recording = recordings[0];
+                const recordingUrl = `https://api.twilio.com${recording.uri.replace('.json', '.mp3')}`;
+                
+                console.log('   Found in Twilio API:', recordingUrl);
+                
+                // Cache it
+                recordingsMap.set(callSid, {
+                    sid: recording.sid,
+                    url: recordingUrl,
+                    duration: recording.duration,
+                    timestamp: Date.now()
+                });
+                
+                return res.json({
+                    success: true,
+                    recordingUrl: recordingUrl,
+                    duration: recording.duration
+                });
+            }
+        } catch (error) {
+            console.error('   Error fetching from Twilio:', error.message);
+        }
+    }
+    
+    console.log('   No recording found');
+    res.status(404).json({ success: false, error: 'Recording not found' });
+});
+
+// GET /recording-audio/:callSid - Stream the actual audio file (proxy for Twilio)
+app.get('/recording-audio/:callSid', async (req, res) => {
+    const { callSid } = req.params;
+    
+    console.log('🎵 Audio stream requested for call:', callSid);
+    
+    try {
+        // First, get the recording URL
+        let recordingUrl = null;
+        let recordingSid = null;
+        
+        // Check local cache
+        const cachedRecording = recordingsMap.get(callSid);
+        if (cachedRecording && cachedRecording.url) {
+            recordingUrl = cachedRecording.url;
+            recordingSid = cachedRecording.sid;
+        }
+        
+        // Check active calls cache
+        if (!recordingUrl) {
+            const cachedCall = activeCalls.get(callSid);
+            if (cachedCall && cachedCall.recordingUrl) {
+                recordingUrl = cachedCall.recordingUrl;
+                recordingSid = cachedCall.recordingSid;
+            }
+        }
+        
+        // Fetch from Twilio if not cached
+        if (!recordingUrl && twilioClient) {
+            const recordings = await twilioClient.recordings.list({
+                callSid: callSid,
+                limit: 1
+            });
+            
+            if (recordings.length > 0) {
+                const recording = recordings[0];
+                recordingSid = recording.sid;
+                recordingUrl = `https://api.twilio.com${recording.uri.replace('.json', '.mp3')}`;
+                
+                // Cache it
+                recordingsMap.set(callSid, {
+                    sid: recordingSid,
+                    url: recordingUrl,
+                    duration: recording.duration,
+                    timestamp: Date.now()
+                });
+            }
+        }
+        
+        if (!recordingUrl) {
+            return res.status(404).json({ error: 'Recording not found' });
+        }
+        
+        console.log('   Streaming from:', recordingUrl);
+        
+        // Fetch the audio from Twilio with authentication
+        const authString = Buffer.from(`${config.twilio.accountSid}:${config.twilio.authToken}`).toString('base64');
+        
+        const audioRequest = https.request(recordingUrl, {
+            headers: {
+                'Authorization': `Basic ${authString}`
+            }
+        }, (audioResponse) => {
+            // Forward headers
+            res.set('Content-Type', audioResponse.headers['content-type'] || 'audio/mpeg');
+            if (audioResponse.headers['content-length']) {
+                res.set('Content-Length', audioResponse.headers['content-length']);
+            }
+            res.set('Accept-Ranges', 'bytes');
+            
+            // Stream the audio
+            audioResponse.pipe(res);
+        });
+        
+        audioRequest.on('error', (err) => {
+            console.error('   Error streaming audio:', err.message);
+            res.status(500).json({ error: 'Failed to stream recording' });
+        });
+        
+        audioRequest.end();
+        
+    } catch (error) {
+        console.error('   Error in audio stream:', error.message);
+        res.status(500).json({ error: 'Failed to stream recording' });
+    }
+});
+
+// ---------------------------------------------------------
 // TWILIO WEBHOOKS - Real-time status updates
 // ---------------------------------------------------------
 app.post('/webhooks/call-status', (req, res) => {
@@ -330,14 +579,48 @@ app.post('/webhooks/call-status', (req, res) => {
             cachedCall.recordingUrl = RecordingUrl;
         }
         
-        // Clean up completed calls after 5 minutes
+        // When call completes, try to fetch recording if not already available
+        if (CallStatus === 'completed' && !cachedCall.recordingUrl && twilioClient) {
+            // Fetch recording asynchronously
+            setTimeout(async () => {
+                try {
+                    const recordings = await twilioClient.recordings.list({
+                        callSid: CallSid,
+                        limit: 1
+                    });
+                    
+                    if (recordings.length > 0) {
+                        const recording = recordings[0];
+                        const recordingUrl = `https://api.twilio.com${recording.uri.replace('.json', '.mp3')}`;
+                        
+                        cachedCall.recordingUrl = recordingUrl;
+                        recordingsMap.set(CallSid, {
+                            sid: recording.sid,
+                            url: recordingUrl,
+                            duration: recording.duration,
+                            timestamp: Date.now()
+                        });
+                        
+                        console.log('✅ Recording fetched after call completed:', recordingUrl);
+                        
+                        // Broadcast recording available
+                        broadcastCallStatus(CallSid, 'recording-ready', recording.duration, recordingUrl);
+                    }
+                } catch (err) {
+                    console.error('Error fetching recording after call:', err.message);
+                }
+            }, 3000); // Wait 3 seconds for recording to be processed
+        }
+        
+        // Clean up completed calls after 10 minutes (longer for recording retrieval)
         if (['completed', 'busy', 'no-answer', 'canceled', 'failed'].includes(CallStatus)) {
-            setTimeout(() => activeCalls.delete(CallSid), 5 * 60 * 1000);
+            setTimeout(() => activeCalls.delete(CallSid), 10 * 60 * 1000);
         }
     }
     
     // 🚀 BROADCAST IMMEDIATELY to all connected WebSocket clients
     broadcastCallStatus(CallSid, CallStatus, duration, RecordingUrl || cachedCall?.recordingUrl);
+    
     
     res.status(200).send('OK');
 });

@@ -1444,7 +1444,7 @@
             }, [setCallHistory]);
 
             const handleCallEnd = useCallback(({ finalStatus, finalDuration, recordingUrl, manual = false }) => {
-                if (callStateRef.current.status === 'finished' || callStateRef.current.status === 'finishing') return;
+                if (callStateRef.current.status === 'finished') return;
                 
                 setCallState(s => ({ ...s, status: 'finishing' }));
                 callCleanup();

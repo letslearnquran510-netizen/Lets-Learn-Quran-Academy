@@ -1662,7 +1662,10 @@
                             }
                         } else if (data.status === 'in-progress' && currentState.status === 'dialing') {
                             console.log('✅ REAL-TIME: Call connected via WebSocket!');
-                            setCallState(s => ({...s, status: 'active'}));
+                            setCallState(s => {
+                                if (s.status === 'finished') return s; // Don't overwrite finished
+                                return {...s, status: 'active'};
+                            });
                             audioManager.stop();
                         }
                     }
@@ -1712,61 +1715,84 @@
                 console.log('📞 handleCallEnd called:', { finalStatus, finalDuration, manual });
                 console.log('   Current status:', callStateRef.current.status);
                 
-                // Only skip if already completely finished
+                // CRITICAL: Check if already finished FIRST
                 if (callStateRef.current.status === 'finished') {
                     console.log('   ⏭️ Already finished, skipping');
                     return;
                 }
                 
-                // Stop all timers and audio immediately
+                // CRITICAL: Set status to finished IMMEDIATELY - before anything else
+                // This ensures the modal closes right away
+                const studentData = callStateRef.current.student;
+                const currentSid = callStateRef.current.sid;
+                
+                console.log('   ✅ FORCING status to finished NOW');
+                setCallState({
+                    status: 'finished',
+                    student: studentData,
+                    sid: null,
+                    duration: finalDuration,
+                    isMuted: false,
+                    isHoldActive: false,
+                    volume: 1,
+                    isMicrophoneReady: false,
+                    finishReason: finalStatus
+                });
+                
+                // Also update ref immediately to prevent any race conditions
+                callStateRef.current.status = 'finished';
+                callStateRef.current.sid = null;
+                
+                // Now stop all timers and audio
                 callCleanup();
 
                 if (finalStatus === 'busy') {
                     audioManager.playBusy();
                 }
 
-                if (!callStateRef.current.student) {
-                    console.log('   ❌ No student found, forcing finish');
-                    setCallState(s => ({ ...s, status: 'finished', finishReason: 'Error: Student not found' }));
+                if (!studentData) {
+                    console.log('   ❌ No student found');
                     return;
                 }
                 
-                let historyStatus = '', summaryMessage = '', toastMessage = '', toastType = 'info';
-                const studentName = callStateRef.current.student.name;
+                let historyStatus = '', toastMessage = '', toastType = 'info';
+                const studentName = studentData.name;
 
                 switch(finalStatus) {
                     case 'completed':
                         if (manual) {
                             historyStatus = 'Completed (Manual Hangup)';
-                            summaryMessage = 'Call Ended';
                             toastMessage = `You ended the call with ${studentName}.`;
                             toastType = 'success';
                         } else {
                             historyStatus = 'Completed (Callee Hung Up)';
-                            summaryMessage = `${studentName} ended the call`;
                             toastMessage = `${studentName} ended the call.`;
                             toastType = 'info';
                         }
                         break;
                     case 'busy':
-                        historyStatus = 'Failed (Line Busy)'; summaryMessage = 'Line was busy';
-                        toastMessage = `Call to ${studentName} failed because the line was busy.`; toastType = 'error';
+                        historyStatus = 'Failed (Line Busy)';
+                        toastMessage = `Call to ${studentName} failed because the line was busy.`; 
+                        toastType = 'error';
                         break;
                     case 'no-answer':
-                         historyStatus = 'Failed (No Answer)'; summaryMessage = 'No Answer';
-                         toastMessage = `The call to ${studentName} was not answered.`; toastType = 'error';
+                        historyStatus = 'Failed (No Answer)';
+                        toastMessage = `The call to ${studentName} was not answered.`; 
+                        toastType = 'error';
                         break;
                     case 'canceled':
-                        historyStatus = 'Canceled'; summaryMessage = 'Call Canceled';
-                        toastMessage = `Call to ${studentName} was canceled.`; toastType = 'info';
+                        historyStatus = 'Canceled';
+                        toastMessage = `Call to ${studentName} was canceled.`; 
+                        toastType = 'info';
                         break;
                     default:
-                        historyStatus = 'Failed (Connection Error)'; summaryMessage = 'Connection Error';
-                        toastMessage = `The call to ${studentName} failed due to an error.`; toastType = 'error';
+                        historyStatus = 'Failed (Connection Error)';
+                        toastMessage = `The call to ${studentName} failed due to an error.`; 
+                        toastType = 'error';
                         break;
                 }
 
-                // Add to history with callSid for recording retrieval
+                // Add to history
                 addCallToHistory({
                     studentName, 
                     status: historyStatus, 
@@ -1774,15 +1800,12 @@
                     teacherName: user.name, 
                     timestamp: new Date().toISOString(),
                     recordingUrl: user.type === 'admin' ? recordingUrl : null,
-                    callSid: callStateRef.current.sid // Store callSid for fetching recording later
+                    callSid: currentSid
                 });
                 
-                // Show toast notification
+                // Show toast
                 addToast(toastMessage, toastType);
-                
-                // Set to finished - this will hide the modal
-                console.log('   ✅ Setting status to finished');
-                setCallState(s => ({ ...s, status: 'finished', duration: finalDuration, finishReason: summaryMessage, sid: null }));
+                console.log('   ✅ handleCallEnd completed');
             }, [addToast, callCleanup, user.name, user.type, addCallToHistory]);
 
             // Store handleCallEnd in ref so WebSocket can call it
@@ -1872,7 +1895,10 @@
                     wsManager.subscribeToCall(data.callSid);
                     console.log('📡 Subscribed to real-time updates for call:', data.callSid);
                     
-                    setCallState(s => ({ ...s, sid: data.callSid }));
+                    setCallState(s => {
+                        if (s.status === 'finished') return s; // Don't start a call if already finished
+                        return { ...s, sid: data.callSid };
+                    });
                 } catch (err) {
                     console.error("Call initiation error:", err);
                     handleCallEnd({ finalStatus: 'failed', finalDuration: 0, recordingUrl: null });
@@ -1881,23 +1907,42 @@
 
             const handleToggleMute = () => {
                 if (!mediaStreamRef.current) return;
+                if (callStateRef.current.status === 'finished') return;
                 const isCurrentlyMuted = callStateRef.current.isMuted;
                 mediaStreamRef.current.getAudioTracks().forEach(track => { track.enabled = isCurrentlyMuted; });
-                setCallState(s => ({ ...s, isMuted: !isCurrentlyMuted }));
+                setCallState(s => {
+                    if (s.status === 'finished') return s;
+                    return { ...s, isMuted: !isCurrentlyMuted };
+                });
             };
             
             const handleToggleHold = (hold) => {
-                 setCallState(s => ({...s, isHoldActive: hold }));
+                setCallState(s => {
+                    if (s.status === 'finished') return s;
+                    return {...s, isHoldActive: hold };
+                });
             };
             
             const handleVolumeChange = (volume) => {
-                setCallState(s => ({...s, volume}));
+                setCallState(s => {
+                    if (s.status === 'finished') return s;
+                    return {...s, volume};
+                });
             }
 
-            // Timer effect
+            // Timer effect - only runs when call is active
             useEffect(() => {
                 if (callState.status === 'active' && !callState.isHoldActive) {
-                    timerRef.current = setInterval(() => setCallState(s => ({ ...s, duration: s.duration + 1 })), 1000);
+                    timerRef.current = setInterval(() => {
+                        // Check status before updating to prevent race condition
+                        if (callStateRef.current.status === 'active') {
+                            setCallState(s => {
+                                // Double check inside state updater
+                                if (s.status !== 'active') return s;
+                                return { ...s, duration: s.duration + 1 };
+                            });
+                        }
+                    }, 1000);
                 } else {
                     stopTimer();
                 }
@@ -1938,21 +1983,30 @@
                             
                             const currentStatus = callStateRef.current.status;
                             
-                            // Handle call connected
+                            // Handle call connected - but only if not already finished
                             if (data.status === 'in-progress' && currentStatus === 'dialing') {
                                 console.log('✅ Call connected!');
                                 stopTimeout(); 
                                 audioManager.stop();
-                                setCallState(s => ({...s, status: 'active'}));
+                                setCallState(s => {
+                                    if (s.status === 'finished') return s; // Don't overwrite finished
+                                    return {...s, status: 'active'};
+                                });
 
                                 try {
                                     if (!navigator.mediaDevices?.getUserMedia) throw new Error('getUserMedia not supported!');
                                     const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
                                     mediaStreamRef.current = stream;
-                                    setCallState(s => ({...s, isMicrophoneReady: true, isMuted: false}));
+                                    setCallState(s => {
+                                        if (s.status === 'finished') return s;
+                                        return {...s, isMicrophoneReady: true, isMuted: false};
+                                    });
                                 } catch (micError) {
                                     console.error("Mic error:", micError);
-                                    setCallState(s => ({...s, isMicrophoneReady: false}));
+                                    setCallState(s => {
+                                        if (s.status === 'finished') return s;
+                                        return {...s, isMicrophoneReady: false};
+                                    });
                                 }
                             }
                             

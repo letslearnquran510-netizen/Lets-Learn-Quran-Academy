@@ -1606,6 +1606,9 @@
             const { user, onLogout, students, setStudents, callHistory, setCallHistory, teachers, setTeachers, addToast, setConfirmation, setPrompt } = props;
             const [activeSection, setActiveSection] = useState(user.type === 'admin' ? 'overview' : 'students');
             const [isSidebarOpen, setSidebarOpen] = useState(false);
+            
+            // CRITICAL: Dedicated state for modal visibility - this is the ONLY thing that controls the modal
+            const [showCallModal, setShowCallModal] = useState(false);
 
             const [callState, setCallState] = useState({
                 status: 'idle', // 'idle', 'dialing', 'active', 'finishing', 'finished'
@@ -1626,6 +1629,10 @@
             const mediaStreamRef = useRef(null);
             const pollFailuresRef = useRef(0);
             
+            // CRITICAL: This ref is the SINGLE SOURCE OF TRUTH for whether call has ended
+            // It's checked SYNCHRONOUSLY before any state update to prevent race conditions
+            const callEndedRef = useRef(false);
+            
             // Refs to hold latest state values for async operations and closures
             const callStateRef = useRef(callState);
             useEffect(() => { callStateRef.current = callState; }, [callState]);
@@ -1641,6 +1648,12 @@
                 // Set up the status update handler
                 wsManager.setStatusHandler((data) => {
                     console.log('📡 WebSocket status update:', data);
+                    
+                    // CRITICAL: Check callEndedRef FIRST
+                    if (callEndedRef.current) {
+                        console.log('   🔒 callEndedRef is true, ignoring WebSocket update');
+                        return;
+                    }
                     
                     const currentState = callStateRef.current;
                     
@@ -1661,9 +1674,12 @@
                                 });
                             }
                         } else if (data.status === 'in-progress' && currentState.status === 'dialing') {
+                            // Double-check callEndedRef before updating
+                            if (callEndedRef.current) return;
+                            
                             console.log('✅ REAL-TIME: Call connected via WebSocket!');
                             setCallState(s => {
-                                if (s.status === 'finished') return s; // Don't overwrite finished
+                                if (s.status === 'finished' || callEndedRef.current) return s;
                                 return {...s, status: 'active'};
                             });
                             audioManager.stop();
@@ -1713,20 +1729,40 @@
 
             const handleCallEnd = useCallback(({ finalStatus, finalDuration, recordingUrl, manual = false }) => {
                 console.log('📞 handleCallEnd called:', { finalStatus, finalDuration, manual });
-                console.log('   Current status:', callStateRef.current.status);
+                console.log('   callEndedRef:', callEndedRef.current);
                 
-                // CRITICAL: Check if already finished FIRST
-                if (callStateRef.current.status === 'finished') {
-                    console.log('   ⏭️ Already finished, skipping');
+                // CRITICAL: Check the ref FIRST
+                if (callEndedRef.current) {
+                    console.log('   ⏭️ callEndedRef is true, call already ended, skipping');
                     return;
                 }
                 
-                // CRITICAL: Set status to finished IMMEDIATELY - before anything else
-                // This ensures the modal closes right away
+                // CRITICAL: Set the ref IMMEDIATELY
+                callEndedRef.current = true;
+                console.log('   🔒 callEndedRef set to TRUE');
+                
+                // CRITICAL: CLOSE THE MODAL FIRST - this is a simple boolean, guaranteed to work
+                console.log('   ❌ CLOSING MODAL NOW');
+                setShowCallModal(false);
+                
+                // Stop all timers and audio
+                if (timerRef.current) { clearInterval(timerRef.current); timerRef.current = null; }
+                if (pollIntervalRef.current) { clearInterval(pollIntervalRef.current); pollIntervalRef.current = null; }
+                if (timeoutRef.current) { clearTimeout(timeoutRef.current); timeoutRef.current = null; }
+                audioManager.stop();
+                
+                // Release microphone
+                if (mediaStreamRef.current) {
+                    mediaStreamRef.current.getTracks().forEach(track => track.stop());
+                    mediaStreamRef.current = null;
+                }
+                
+                // Get student data before clearing
                 const studentData = callStateRef.current.student;
                 const currentSid = callStateRef.current.sid;
                 
-                console.log('   ✅ FORCING status to finished NOW');
+                // Now set the state
+                console.log('   ✅ Setting status to finished');
                 setCallState({
                     status: 'finished',
                     student: studentData,
@@ -1739,12 +1775,9 @@
                     finishReason: finalStatus
                 });
                 
-                // Also update ref immediately to prevent any race conditions
+                // Also update ref
                 callStateRef.current.status = 'finished';
                 callStateRef.current.sid = null;
-                
-                // Now stop all timers and audio
-                callCleanup();
 
                 if (finalStatus === 'busy') {
                     audioManager.playBusy();
@@ -1854,6 +1887,12 @@
                 const { student, duration } = callStateRef.current;
                 if (!student) return;
 
+                // Set callEndedRef since we're ending the call
+                callEndedRef.current = true;
+                
+                // Close modal immediately
+                setShowCallModal(false);
+                
                 callCleanup();
                 
                 const transferStatus = `Transferred to ${teacher.name}`;
@@ -1871,6 +1910,14 @@
                     addToast('Cannot start a new call while another is active.', 'error');
                     return;
                 };
+
+                // CRITICAL: Reset callEndedRef when starting a new call
+                callEndedRef.current = false;
+                console.log('📞 Starting new call - callEndedRef reset to false');
+
+                // CRITICAL: Show the modal FIRST
+                setShowCallModal(true);
+                console.log('📞 Modal opened');
 
                 audioManager.playRinging();
                 setCallState({
@@ -1917,28 +1964,35 @@
             };
             
             const handleToggleHold = (hold) => {
+                if (callEndedRef.current) return;
                 setCallState(s => {
-                    if (s.status === 'finished') return s;
+                    if (s.status === 'finished' || callEndedRef.current) return s;
                     return {...s, isHoldActive: hold };
                 });
             };
             
             const handleVolumeChange = (volume) => {
+                if (callEndedRef.current) return;
                 setCallState(s => {
-                    if (s.status === 'finished') return s;
+                    if (s.status === 'finished' || callEndedRef.current) return s;
                     return {...s, volume};
                 });
             }
 
             // Timer effect - only runs when call is active
             useEffect(() => {
-                if (callState.status === 'active' && !callState.isHoldActive) {
+                if (callState.status === 'active' && !callState.isHoldActive && !callEndedRef.current) {
                     timerRef.current = setInterval(() => {
-                        // Check status before updating to prevent race condition
+                        // Check callEndedRef FIRST - this is the bulletproof check
+                        if (callEndedRef.current) {
+                            clearInterval(timerRef.current);
+                            timerRef.current = null;
+                            return;
+                        }
+                        
                         if (callStateRef.current.status === 'active') {
                             setCallState(s => {
-                                // Double check inside state updater
-                                if (s.status !== 'active') return s;
+                                if (s.status !== 'active' || callEndedRef.current) return s;
                                 return { ...s, duration: s.duration + 1 };
                             });
                         }
@@ -1953,13 +2007,18 @@
             // Server checks Twilio directly on every poll for active calls
             // Polls every 1 second for instant hangup detection
             useEffect(() => {
+                // Don't start polling if call already ended
+                if (callEndedRef.current) return;
+                
                 if (callState.sid && (callState.status === 'dialing' || callState.status === 'active')) {
                     console.log('🔄 Starting real-time poll for call:', callState.sid);
                     
                     // Immediate first check
                     (async () => {
+                        if (callEndedRef.current) return;
                         try {
                             const data = await api.getStatus(callState.sid);
+                            if (callEndedRef.current) return; // Check again after async
                             const terminalStatuses = ['completed', 'busy', 'no-answer', 'canceled', 'failed'];
                             if (terminalStatuses.includes(data.status)) {
                                 console.log('🔴 Call already ended:', data.status);
@@ -1977,42 +2036,61 @@
                     })();
                     
                     pollIntervalRef.current = setInterval(async () => {
+                        // CRITICAL: Check callEndedRef FIRST
+                        if (callEndedRef.current) {
+                            console.log('🔒 Poll: callEndedRef is true, stopping poll');
+                            clearInterval(pollIntervalRef.current);
+                            pollIntervalRef.current = null;
+                            return;
+                        }
+                        
                         try {
                             const data = await api.getStatus(callState.sid);
+                            
+                            // Check again after async operation
+                            if (callEndedRef.current) {
+                                clearInterval(pollIntervalRef.current);
+                                pollIntervalRef.current = null;
+                                return;
+                            }
+                            
                             pollFailuresRef.current = 0;
                             
                             const currentStatus = callStateRef.current.status;
                             
                             // Handle call connected - but only if not already finished
-                            if (data.status === 'in-progress' && currentStatus === 'dialing') {
+                            if (data.status === 'in-progress' && currentStatus === 'dialing' && !callEndedRef.current) {
                                 console.log('✅ Call connected!');
                                 stopTimeout(); 
                                 audioManager.stop();
                                 setCallState(s => {
-                                    if (s.status === 'finished') return s; // Don't overwrite finished
+                                    if (s.status === 'finished' || callEndedRef.current) return s;
                                     return {...s, status: 'active'};
                                 });
 
                                 try {
                                     if (!navigator.mediaDevices?.getUserMedia) throw new Error('getUserMedia not supported!');
                                     const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+                                    if (callEndedRef.current) return; // Don't update if call ended
                                     mediaStreamRef.current = stream;
                                     setCallState(s => {
-                                        if (s.status === 'finished') return s;
+                                        if (s.status === 'finished' || callEndedRef.current) return s;
                                         return {...s, isMicrophoneReady: true, isMuted: false};
                                     });
                                 } catch (micError) {
                                     console.error("Mic error:", micError);
-                                    setCallState(s => {
-                                        if (s.status === 'finished') return s;
-                                        return {...s, isMicrophoneReady: false};
-                                    });
+                                    if (!callEndedRef.current) {
+                                        setCallState(s => {
+                                            if (s.status === 'finished' || callEndedRef.current) return s;
+                                            return {...s, isMicrophoneReady: false};
+                                        });
+                                    }
                                 }
                             }
                             
                             // Handle call ended - detect terminal statuses
                             const terminalStatuses = ['completed', 'busy', 'no-answer', 'canceled', 'failed'];
-                            if (terminalStatuses.includes(data.status) && currentStatus !== 'finished') {
+                            if (terminalStatuses.includes(data.status) && currentStatus !== 'finished' && !callEndedRef.current) {
                                 console.log('🔴 Call ended detected:', data.status);
                                 // Stop polling immediately
                                 if (pollIntervalRef.current) {
@@ -2061,7 +2139,10 @@
                         return <CallCenterSection
                             user={user} students={students}
                             onInitiateCall={initiateCall} callState={callState}
-                            onResetCall={() => setCallState({ status: 'idle', student: null, sid: null, duration: 0, isMuted: false, isHoldActive: false, isMicrophoneReady: false, finishReason: ''})}
+                            onResetCall={() => {
+                                setShowCallModal(false);
+                                setCallState({ status: 'idle', student: null, sid: null, duration: 0, isMuted: false, isHoldActive: false, isMicrophoneReady: false, finishReason: ''});
+                            }}
                         />;
                     case 'history':
                         return <HistorySection user={user} callHistory={callHistory} />;
@@ -2092,7 +2173,7 @@
                             </div>
                         </div>
                     </main>
-                    {['dialing', 'active'].includes(callState.status) && callState.student && (
+                    {showCallModal && callState.student && (
                         <FloatingCallModal 
                             user={user}
                             callState={callState}

@@ -815,12 +815,12 @@
                                 // Use proxy URL for Twilio recordings
                                 setAudioUrl(`${BACKEND_URL}/recording-audio/${callSid}`);
                             } else {
-                                setError('Recording not available yet. It may take a few moments to process.');
+                                setError(data.error || 'Recording not available. The call may have been too short or is still processing.');
                             }
                         })
                         .catch(err => {
                             console.error('Error fetching recording:', err);
-                            setError('Failed to load recording.');
+                            setError('Failed to load recording. Please try again.');
                         })
                         .finally(() => setLoading(false));
                 } else {
@@ -1036,7 +1036,7 @@
                                             </div>
 
                                             <div className="flex-shrink-0">
-                                                {call.callSid && user.type === 'admin' && call.status.includes('Completed') && (
+                                                {call.callSid && user.type === 'admin' && call.status.includes('Completed') && call.duration > 0 && (
                                                     <button 
                                                         onClick={() => setNowPlaying({ 
                                                             url: call.recordingUrl, 

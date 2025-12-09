@@ -452,28 +452,31 @@ app.get('/recording/:callSid', async (req, res) => {
     // Check local cache first
     const cachedRecording = recordingsMap.get(callSid);
     if (cachedRecording && cachedRecording.url) {
-        console.log('   Found in cache:', cachedRecording.url);
+        console.log('   ✅ Found in cache:', cachedRecording.url);
         return res.json({
             success: true,
             recordingUrl: cachedRecording.url,
-            duration: cachedRecording.duration
+            duration: cachedRecording.duration,
+            source: 'cache'
         });
     }
     
     // Check active calls cache
     const cachedCall = activeCalls.get(callSid);
     if (cachedCall && cachedCall.recordingUrl) {
-        console.log('   Found in active calls:', cachedCall.recordingUrl);
+        console.log('   ✅ Found in active calls:', cachedCall.recordingUrl);
         return res.json({
             success: true,
             recordingUrl: cachedCall.recordingUrl,
-            duration: cachedCall.duration
+            duration: cachedCall.duration,
+            source: 'active-cache'
         });
     }
     
     // Try to fetch from Twilio API
     if (twilioClient) {
         try {
+            console.log('   🔍 Searching Twilio API for recording...');
             const recordings = await twilioClient.recordings.list({
                 callSid: callSid,
                 limit: 1
@@ -483,7 +486,8 @@ app.get('/recording/:callSid', async (req, res) => {
                 const recording = recordings[0];
                 const recordingUrl = `https://api.twilio.com${recording.uri.replace('.json', '.mp3')}`;
                 
-                console.log('   Found in Twilio API:', recordingUrl);
+                console.log('   ✅ Found in Twilio API:', recordingUrl);
+                console.log('   Duration:', recording.duration, 'seconds');
                 
                 // Cache it
                 recordingsMap.set(callSid, {
@@ -496,16 +500,28 @@ app.get('/recording/:callSid', async (req, res) => {
                 return res.json({
                     success: true,
                     recordingUrl: recordingUrl,
-                    duration: recording.duration
+                    duration: recording.duration,
+                    source: 'twilio-api'
                 });
+            } else {
+                console.log('   ❌ No recording found in Twilio API');
+                console.log('   This could mean:');
+                console.log('   - The call was too short (< 1 second)');
+                console.log('   - The call was not answered');
+                console.log('   - Recording is still processing (try again in a few seconds)');
             }
         } catch (error) {
-            console.error('   Error fetching from Twilio:', error.message);
+            console.error('   ❌ Error fetching from Twilio:', error.message);
         }
+    } else {
+        console.log('   ❌ Twilio client not configured');
     }
     
-    console.log('   No recording found');
-    res.status(404).json({ success: false, error: 'Recording not found' });
+    console.log('   ❌ No recording found for call:', callSid);
+    res.status(404).json({ 
+        success: false, 
+        error: 'Recording not found. The call may have been too short or is still processing.' 
+    });
 });
 
 // GET /recording-audio/:callSid - Stream the actual audio file (proxy for Twilio)

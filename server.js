@@ -889,7 +889,7 @@ app.get('/recording/:callSid', async (req, res) => {
                 const recording = recordings[0];
                 const recordingUrl = `https://api.twilio.com${recording.uri.replace('.json', '.mp3')}`;
                 
-                recordingsMap.set(callSid, { 
+                recordingsMap.set(callSid, {
                     sid: recording.sid,
                     url: recordingUrl,
                     duration: recording.duration,

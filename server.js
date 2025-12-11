@@ -1,6 +1,6 @@
 // ========================================
 // QURAN ACADEMY CALLING SERVER
-// With. MongoDB Database & WebSocket
+// With MongoDB Database & WebSocket
 // ========================================
 
 const express = require('express');
@@ -135,12 +135,29 @@ const conversationSchema = new mongoose.Schema({
     updatedAt: { type: Date, default: Date.now }
 });
 
+// Video Room Schema
+const videoRoomSchema = new mongoose.Schema({
+    roomName: { type: String, required: true, unique: true },
+    roomSid: { type: String },
+    studentId: { type: String, required: true },
+    studentName: { type: String, required: true },
+    studentPhone: { type: String, required: true },
+    teacherId: { type: String, required: true },
+    teacherName: { type: String, required: true },
+    status: { type: String, enum: ['waiting', 'active', 'completed'], default: 'waiting' },
+    joinUrl: { type: String },
+    startedAt: { type: Date, default: Date.now },
+    endedAt: { type: Date },
+    duration: { type: Number, default: 0 }
+});
+
 // Create models
 const User = mongoose.model('User', userSchema);
 const Student = mongoose.model('Student', studentSchema);
 const CallHistory = mongoose.model('CallHistory', callHistorySchema);
 const Message = mongoose.model('Message', messageSchema);
 const Conversation = mongoose.model('Conversation', conversationSchema);
+const VideoRoom = mongoose.model('VideoRoom', videoRoomSchema);
 
 // Initialize default admin account
 async function initializeAdmin() {
@@ -168,6 +185,7 @@ async function initializeAdmin() {
 // ---------------------------------------------------------
 const activeCalls = new Map();
 const recordingsMap = new Map();
+const activeVideoRooms = new Map(); // For tracking active video rooms
 
 // In-memory fallback if MongoDB not connected
 let inMemoryStudents = [];
@@ -807,6 +825,326 @@ app.get('/api/sms/unread-count', async (req, res) => {
         res.status(500).json({ success: false, error: 'Failed to get unread count' });
     }
 });
+
+// ==========================================================
+// VIDEO CALLING API
+// ==========================================================
+
+// Twilio AccessToken for Video
+const AccessToken = twilio.jwt.AccessToken;
+const VideoGrant = AccessToken.VideoGrant;
+
+// Generate a unique room name
+function generateRoomName() {
+    return 'quran-room-' + Date.now() + '-' + Math.random().toString(36).substring(2, 8);
+}
+
+// Generate access token for video room
+function generateVideoToken(identity, roomName) {
+    const token = new AccessToken(
+        config.twilio.accountSid,
+        process.env.TWILIO_API_KEY_SID || config.twilio.accountSid,
+        process.env.TWILIO_API_KEY_SECRET || config.twilio.authToken,
+        { identity: identity }
+    );
+    
+    const videoGrant = new VideoGrant({
+        room: roomName
+    });
+    
+    token.addGrant(videoGrant);
+    return token.toJwt();
+}
+
+// Create a new video room and send invite to student
+app.post('/api/video/create-room', async (req, res) => {
+    const { studentId, studentName, studentPhone, teacherId, teacherName } = req.body;
+    
+    console.log('\n' + '='.repeat(50));
+    console.log('🎥 CREATING VIDEO ROOM');
+    console.log('   Student:', studentName);
+    console.log('   Teacher:', teacherName);
+    console.log('='.repeat(50));
+    
+    if (!studentPhone || !studentName) {
+        return res.status(400).json({ success: false, error: 'Student info required' });
+    }
+    
+    try {
+        const roomName = generateRoomName();
+        const joinUrl = `${config.publicUrl}/video-room.html?room=${roomName}&name=${encodeURIComponent(studentName)}`;
+        
+        // Generate teacher token
+        const teacherToken = generateVideoToken(teacherName || 'Teacher', roomName);
+        
+        // Save room to database
+        const roomData = {
+            roomName,
+            studentId: studentId || studentPhone,
+            studentName,
+            studentPhone,
+            teacherId: teacherId || 'admin',
+            teacherName: teacherName || 'Teacher',
+            status: 'waiting',
+            joinUrl,
+            startedAt: new Date()
+        };
+        
+        let savedRoom;
+        if (dbConnected) {
+            savedRoom = await VideoRoom.create(roomData);
+        } else {
+            savedRoom = { ...roomData, _id: Date.now().toString() };
+        }
+        
+        // Track active room
+        activeVideoRooms.set(roomName, {
+            ...roomData,
+            teacherJoined: false,
+            studentJoined: false
+        });
+        
+        // Send SMS invitation to student
+        if (twilioClient) {
+            try {
+                const smsBody = `Assalam Alaikum ${studentName}! Your teacher is waiting for you in a video class. Join now: ${joinUrl}`;
+                
+                await twilioClient.messages.create({
+                    body: smsBody,
+                    from: config.twilio.phoneNumber,
+                    to: studentPhone
+                });
+                
+                console.log('✅ SMS invitation sent to student');
+            } catch (smsErr) {
+                console.error('⚠️ Failed to send SMS invitation:', smsErr.message);
+                // Continue even if SMS fails - teacher can share link manually
+            }
+        }
+        
+        console.log('✅ Video room created:', roomName);
+        console.log('   Join URL:', joinUrl);
+        
+        res.json({
+            success: true,
+            room: {
+                roomName,
+                joinUrl,
+                teacherToken,
+                studentName,
+                studentPhone,
+                status: 'waiting'
+            }
+        });
+        
+    } catch (err) {
+        console.error('❌ Create video room error:', err);
+        res.status(500).json({ success: false, error: err.message || 'Failed to create video room' });
+    }
+});
+
+// Get token for joining a video room (for students)
+app.get('/api/video/join/:roomName', async (req, res) => {
+    const { roomName } = req.params;
+    const { name } = req.query;
+    
+    console.log('🎥 Student joining room:', roomName, 'Name:', name);
+    
+    if (!roomName || !name) {
+        return res.status(400).json({ success: false, error: 'Room name and participant name required' });
+    }
+    
+    try {
+        // Check if room exists
+        const roomInfo = activeVideoRooms.get(roomName);
+        if (!roomInfo) {
+            // Try to find in database
+            if (dbConnected) {
+                const dbRoom = await VideoRoom.findOne({ roomName });
+                if (!dbRoom) {
+                    return res.status(404).json({ success: false, error: 'Video room not found or has expired' });
+                }
+                if (dbRoom.status === 'completed') {
+                    return res.status(400).json({ success: false, error: 'This video call has already ended' });
+                }
+            } else {
+                return res.status(404).json({ success: false, error: 'Video room not found' });
+            }
+        }
+        
+        // Generate token for student
+        const token = generateVideoToken(name, roomName);
+        
+        // Update room status
+        if (roomInfo) {
+            roomInfo.studentJoined = true;
+            if (roomInfo.teacherJoined) {
+                roomInfo.status = 'active';
+            }
+        }
+        
+        // Update database
+        if (dbConnected) {
+            await VideoRoom.findOneAndUpdate(
+                { roomName },
+                { status: roomInfo?.teacherJoined ? 'active' : 'waiting' }
+            );
+        }
+        
+        // Broadcast student joined
+        broadcastVideoEvent(roomName, 'STUDENT_JOINED', { name });
+        
+        console.log('✅ Student token generated for room:', roomName);
+        
+        res.json({
+            success: true,
+            token,
+            roomName,
+            identity: name
+        });
+        
+    } catch (err) {
+        console.error('❌ Join video room error:', err);
+        res.status(500).json({ success: false, error: 'Failed to join video room' });
+    }
+});
+
+// Teacher refreshes their token
+app.post('/api/video/refresh-token', (req, res) => {
+    const { roomName, identity } = req.body;
+    
+    if (!roomName || !identity) {
+        return res.status(400).json({ success: false, error: 'Room name and identity required' });
+    }
+    
+    try {
+        const token = generateVideoToken(identity, roomName);
+        res.json({ success: true, token });
+    } catch (err) {
+        console.error('Token refresh error:', err);
+        res.status(500).json({ success: false, error: 'Failed to refresh token' });
+    }
+});
+
+// End a video room
+app.post('/api/video/end-room', async (req, res) => {
+    const { roomName } = req.body;
+    
+    console.log('🎥 Ending video room:', roomName);
+    
+    try {
+        // Remove from active rooms
+        const roomInfo = activeVideoRooms.get(roomName);
+        activeVideoRooms.delete(roomName);
+        
+        // Update database
+        if (dbConnected) {
+            await VideoRoom.findOneAndUpdate(
+                { roomName },
+                { 
+                    status: 'completed',
+                    endedAt: new Date(),
+                    duration: roomInfo ? Math.floor((Date.now() - new Date(roomInfo.startedAt).getTime()) / 1000) : 0
+                }
+            );
+        }
+        
+        // Broadcast room ended
+        broadcastVideoEvent(roomName, 'ROOM_ENDED', {});
+        
+        console.log('✅ Video room ended:', roomName);
+        
+        res.json({ success: true });
+        
+    } catch (err) {
+        console.error('End video room error:', err);
+        res.status(500).json({ success: false, error: 'Failed to end video room' });
+    }
+});
+
+// Get room status
+app.get('/api/video/room-status/:roomName', async (req, res) => {
+    const { roomName } = req.params;
+    
+    try {
+        const roomInfo = activeVideoRooms.get(roomName);
+        
+        if (roomInfo) {
+            return res.json({
+                success: true,
+                room: {
+                    roomName,
+                    status: roomInfo.status,
+                    teacherJoined: roomInfo.teacherJoined,
+                    studentJoined: roomInfo.studentJoined,
+                    studentName: roomInfo.studentName
+                }
+            });
+        }
+        
+        // Check database
+        if (dbConnected) {
+            const dbRoom = await VideoRoom.findOne({ roomName });
+            if (dbRoom) {
+                return res.json({
+                    success: true,
+                    room: {
+                        roomName: dbRoom.roomName,
+                        status: dbRoom.status,
+                        studentName: dbRoom.studentName
+                    }
+                });
+            }
+        }
+        
+        res.status(404).json({ success: false, error: 'Room not found' });
+        
+    } catch (err) {
+        console.error('Get room status error:', err);
+        res.status(500).json({ success: false, error: 'Failed to get room status' });
+    }
+});
+
+// Get active video rooms for teacher
+app.get('/api/video/active-rooms', async (req, res) => {
+    try {
+        const rooms = [];
+        activeVideoRooms.forEach((room, roomName) => {
+            if (room.status !== 'completed') {
+                rooms.push({
+                    roomName,
+                    studentName: room.studentName,
+                    status: room.status,
+                    startedAt: room.startedAt,
+                    teacherJoined: room.teacherJoined,
+                    studentJoined: room.studentJoined
+                });
+            }
+        });
+        
+        res.json({ success: true, rooms });
+    } catch (err) {
+        console.error('Get active rooms error:', err);
+        res.status(500).json({ success: false, error: 'Failed to get active rooms' });
+    }
+});
+
+// Broadcast video events via WebSocket
+function broadcastVideoEvent(roomName, eventType, data) {
+    const message = JSON.stringify({
+        type: 'VIDEO_EVENT',
+        roomName,
+        eventType,
+        data,
+        timestamp: Date.now()
+    });
+    
+    wsClients.forEach(client => {
+        if (client.readyState === WebSocket.OPEN) {
+            client.send(message);
+        }
+    });
+}
 
 // ==========================================================
 // TWILIO CALLING ENDPOINTS

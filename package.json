@@ -1,7 +1,7 @@
 {
   "name": "quran-academy-dialer",
-  "version": "3.0.0",
-  "description": "Quran Academy Professional Calling System with MongoDB Database",
+  "version": "4.0.0",
+  "description": "Quran Academy Professional Calling System with Video Calls, SMS, and MongoDB Database",
   "main": "server.js",
   "scripts": {
     "start": "node server.js"

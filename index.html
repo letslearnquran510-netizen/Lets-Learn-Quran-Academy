@@ -125,6 +125,20 @@
                     </svg>
                 </IconWrapper>
             ),
+            Messages: ({ className }) => (
+                <IconWrapper className={className}>
+                    <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor">
+                        <path strokeLinecap="round" strokeLinejoin="round" d="M8.625 12a.375.375 0 11-.75 0 .375.375 0 01.75 0zm0 0H8.25m4.125 0a.375.375 0 11-.75 0 .375.375 0 01.75 0zm0 0H12m4.125 0a.375.375 0 11-.75 0 .375.375 0 01.75 0zm0 0h-.375M21 12c0 4.556-4.03 8.25-9 8.25a9.764 9.764 0 01-2.555-.337A5.972 5.972 0 015.41 20.97a5.969 5.969 0 01-.474-.065 4.48 4.48 0 00.978-2.025c.09-.457-.133-.901-.467-1.226C3.93 16.178 3 14.189 3 12c0-4.556 4.03-8.25 9-8.25s9 3.694 9 8.25z" />
+                    </svg>
+                </IconWrapper>
+            ),
+            Send: ({ className }) => (
+                <IconWrapper className={className}>
+                    <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor">
+                        <path strokeLinecap="round" strokeLinejoin="round" d="M6 12L3.269 3.126A59.768 59.768 0 0121.485 12 59.77 59.77 0 013.27 20.876L5.999 12zm0 0h7.5" />
+                    </svg>
+                </IconWrapper>
+            ),
             Search: ({ className }) => (
                  <IconWrapper className={className}>
                     <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor">
@@ -1262,6 +1276,7 @@
             let reconnectTimeout = null;
             let pingInterval = null;
             let onStatusUpdate = null;
+            let onSmsMessage = null;
             let subscribedCallSid = null;
             let isConnected = false;
 
@@ -1296,6 +1311,10 @@
                             
                             if (data.type === 'CALL_STATUS_UPDATE' && onStatusUpdate) {
                                 onStatusUpdate(data);
+                            }
+                            
+                            if (data.type === 'NEW_SMS_MESSAGE' && onSmsMessage) {
+                                onSmsMessage(data.message);
                             }
                         } catch (e) {
                             console.error('WS message parse error:', e);
@@ -1336,6 +1355,10 @@
                 onStatusUpdate = handler;
             };
             
+            const setSmsHandler = (handler) => {
+                onSmsMessage = handler;
+            };
+            
             const disconnect = () => {
                 if (reconnectTimeout) clearTimeout(reconnectTimeout);
                 if (pingInterval) clearInterval(pingInterval);
@@ -1346,7 +1369,7 @@
             
             const getIsConnected = () => isConnected;
             
-            return { connect, subscribeToCall, unsubscribe, setStatusHandler, disconnect, getIsConnected };
+            return { connect, subscribeToCall, unsubscribe, setStatusHandler, setSmsHandler, disconnect, getIsConnected };
         };
 
         // Global WebSocket manager instance
@@ -1361,6 +1384,8 @@
             const [students, setStudents] = useState([]);
             const [callHistory, setCallHistory] = useState([]);
             const [teachers, setTeachers] = useState([]);
+            const [conversations, setConversations] = useState([]);
+            const [smsMessages, setSmsMessages] = useState([]);
             const [dataLoaded, setDataLoaded] = useState(false);
             const [dbStatus, setDbStatus] = useState(null);
             
@@ -1415,6 +1440,18 @@
                             }));
                             setCallHistory(transformedHistory);
                             console.log('   Call history loaded:', transformedHistory.length);
+                        }
+                        
+                        // Load SMS conversations
+                        const convoRes = await fetch(`${BACKEND_URL}/api/sms/conversations`);
+                        const convoData = await convoRes.json();
+                        if (convoData.success) {
+                            const transformedConversations = convoData.conversations.map(c => ({
+                                ...c,
+                                id: c._id || c.studentId
+                            }));
+                            setConversations(transformedConversations);
+                            console.log('   Conversations loaded:', transformedConversations.length);
                         }
                         
                         setDataLoaded(true);
@@ -1620,6 +1657,10 @@
                         setCallHistory={setCallHistory}
                         teachers={teachers}
                         setTeachers={setTeachers}
+                        conversations={conversations}
+                        setConversations={setConversations}
+                        smsMessages={smsMessages}
+                        setSmsMessages={setSmsMessages}
                         addToast={addToast}
                         setConfirmation={setConfirmation}
                         setPrompt={setPrompt}
@@ -1898,7 +1939,7 @@
 
         // --- Dashboard Component (The main logged-in view) ---
         const Dashboard = (props) => {
-            const { user, onLogout, students, setStudents, callHistory, setCallHistory, teachers, setTeachers, addToast, setConfirmation, setPrompt, dbStatus, addStudent: addStudentAPI, updateStudent: updateStudentAPI, deleteStudent: deleteStudentAPI, addTeacher: addTeacherAPI, updateTeacher: updateTeacherAPI, deleteTeacher: deleteTeacherAPI, addCallToHistoryAPI } = props;
+            const { user, onLogout, students, setStudents, callHistory, setCallHistory, teachers, setTeachers, addToast, setConfirmation, setPrompt, dbStatus, addStudent: addStudentAPI, updateStudent: updateStudentAPI, deleteStudent: deleteStudentAPI, addTeacher: addTeacherAPI, updateTeacher: updateTeacherAPI, deleteTeacher: deleteTeacherAPI, addCallToHistoryAPI, conversations, setConversations, smsMessages, setSmsMessages } = props;
             const [activeSection, setActiveSection] = useState(user.type === 'admin' ? 'overview' : 'students');
             const [isSidebarOpen, setSidebarOpen] = useState(false);
             
@@ -1979,6 +2020,58 @@
                             });
                             audioManager.stop();
                         }
+                    }
+                });
+                
+                // Set up the SMS message handler
+                wsManager.setSmsHandler((message) => {
+                    console.log('📱 WebSocket SMS received:', message);
+                    
+                    // Update messages if viewing this conversation
+                    setSmsMessages(prev => {
+                        // Check if message already exists (by _id or messageSid)
+                        const exists = prev.some(m => 
+                            (m._id && m._id === message._id) || 
+                            (m.messageSid && m.messageSid === message.messageSid)
+                        );
+                        if (exists) return prev;
+                        return [...prev, message];
+                    });
+                    
+                    // Update conversations list
+                    setConversations(prev => {
+                        const existing = prev.find(c => c.studentId === message.studentId || c.studentPhone === message.studentPhone);
+                        if (existing) {
+                            return prev.map(c => {
+                                if (c.studentId === message.studentId || c.studentPhone === message.studentPhone) {
+                                    return {
+                                        ...c,
+                                        lastMessage: message.body,
+                                        lastMessageTime: message.timestamp,
+                                        lastMessageDirection: message.direction,
+                                        unreadCount: message.direction === 'inbound' ? (c.unreadCount || 0) + 1 : c.unreadCount
+                                    };
+                                }
+                                return c;
+                            }).sort((a, b) => new Date(b.lastMessageTime) - new Date(a.lastMessageTime));
+                        } else {
+                            // New conversation
+                            return [{
+                                id: message.studentId,
+                                studentId: message.studentId,
+                                studentName: message.studentName,
+                                studentPhone: message.studentPhone,
+                                lastMessage: message.body,
+                                lastMessageTime: message.timestamp,
+                                lastMessageDirection: message.direction,
+                                unreadCount: message.direction === 'inbound' ? 1 : 0
+                            }, ...prev];
+                        }
+                    });
+                    
+                    // Show toast notification for incoming messages
+                    if (message.direction === 'inbound') {
+                        addToast(`New message from ${message.studentName}: ${message.body.substring(0, 50)}...`, 'info');
                     }
                 });
                 
@@ -2424,6 +2517,7 @@
                 overview: { title: 'Dashboard Overview', subtitle: "Welcome back! Here's your overview" },
                 students: { title: 'Students List', subtitle: 'Select a student to begin calling' },
                 calls: { title: 'Call Center', subtitle: 'Make calls to your students' },
+                messages: { title: 'Messages', subtitle: 'Send and receive SMS messages' },
                 history: { title: 'Call History', subtitle: 'View all past calls' },
                 analytics: { title: 'Analytics & Reports', subtitle: 'Performance metrics' },
                 users: { title: 'User Management', subtitle: 'Manage teacher accounts' },
@@ -2450,6 +2544,16 @@
                         />;
                     case 'history':
                         return <HistorySection user={user} callHistory={callHistory} />;
+                    case 'messages':
+                        return <MessagesSection 
+                            user={user} 
+                            students={students}
+                            conversations={conversations}
+                            setConversations={setConversations}
+                            messages={smsMessages}
+                            setMessages={setSmsMessages}
+                            addToast={addToast}
+                        />;
                     case 'analytics':
                          return user.type === 'admin' ? <AnalyticsSection callHistory={callHistory} /> : null;
                     case 'users':
@@ -2559,6 +2663,7 @@
                             {user.type === 'admin' && <NavItem section="overview" icon={<Icons.Dashboard className="w-5 h-5"/>} label="Overview" />}
                             <NavItem section="students" icon={<Icons.Students className="w-5 h-5"/>} label="Students" />
                             <NavItem section="calls" icon={<Icons.CallCenter className="w-5 h-5"/>} label="Call Center" />
+                            <NavItem section="messages" icon={<Icons.Messages className="w-5 h-5"/>} label="Messages" />
                             <NavItem section="history" icon={<Icons.History className="w-5 h-5"/>} label="History" />
                             {user.type === 'admin' && <NavItem section="analytics" icon={<Icons.Analytics className="w-5 h-5"/>} label="Analytics" />}
                             {user.type === 'admin' && <NavItem section="users" icon={<Icons.Users className="w-5 h-5"/>} label="Users" />}
@@ -2929,6 +3034,331 @@
                             </div>
                         </div>
                     )}
+                </div>
+            );
+        };
+
+        // --- Messages Section Component ---
+        const MessagesSection = ({ user, students, conversations, setConversations, messages, setMessages, addToast }) => {
+            const [selectedStudentId, setSelectedStudentId] = useState(null);
+            const [chatMessages, setChatMessages] = useState([]);
+            const [newMessage, setNewMessage] = useState('');
+            const [isSending, setIsSending] = useState(false);
+            const [isLoadingMessages, setIsLoadingMessages] = useState(false);
+            const [searchTerm, setSearchTerm] = useState('');
+            const messagesEndRef = useRef(null);
+            
+            // Get selected student/conversation
+            const selectedConversation = useMemo(() => 
+                conversations.find(c => c.studentId === selectedStudentId || String(c.studentId) === String(selectedStudentId)),
+                [conversations, selectedStudentId]
+            );
+            
+            const selectedStudent = useMemo(() => 
+                students.find(s => String(s.id) === String(selectedStudentId) || String(s._id) === String(selectedStudentId)),
+                [students, selectedStudentId]
+            );
+            
+            // Filter conversations by search term
+            const filteredConversations = useMemo(() => {
+                if (!searchTerm) return conversations;
+                return conversations.filter(c => 
+                    c.studentName.toLowerCase().includes(searchTerm.toLowerCase()) ||
+                    c.studentPhone.includes(searchTerm)
+                );
+            }, [conversations, searchTerm]);
+            
+            // Load messages when selecting a conversation
+            useEffect(() => {
+                if (!selectedStudentId) {
+                    setChatMessages([]);
+                    return;
+                }
+                
+                const loadMessages = async () => {
+                    setIsLoadingMessages(true);
+                    try {
+                        const res = await fetch(`${BACKEND_URL}/api/sms/messages/${selectedStudentId}`);
+                        const data = await res.json();
+                        if (data.success) {
+                            setChatMessages(data.messages);
+                            
+                            // Mark as read in conversations
+                            setConversations(prev => prev.map(c => 
+                                c.studentId === selectedStudentId ? { ...c, unreadCount: 0 } : c
+                            ));
+                        }
+                    } catch (err) {
+                        console.error('Failed to load messages:', err);
+                        addToast('Failed to load messages', 'error');
+                    }
+                    setIsLoadingMessages(false);
+                };
+                
+                loadMessages();
+            }, [selectedStudentId, setConversations, addToast]);
+            
+            // Update chat when global messages update (WebSocket)
+            useEffect(() => {
+                if (selectedStudentId && messages.length > 0) {
+                    const newMsgs = messages.filter(m => 
+                        (m.studentId === selectedStudentId || String(m.studentId) === String(selectedStudentId)) &&
+                        !chatMessages.some(cm => cm._id === m._id || cm.messageSid === m.messageSid)
+                    );
+                    if (newMsgs.length > 0) {
+                        setChatMessages(prev => [...prev, ...newMsgs]);
+                    }
+                }
+            }, [messages, selectedStudentId, chatMessages]);
+            
+            // Scroll to bottom when new messages arrive
+            useEffect(() => {
+                messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+            }, [chatMessages]);
+            
+            // Send message
+            const handleSendMessage = async () => {
+                if (!newMessage.trim() || !selectedStudentId) return;
+                
+                const student = selectedStudent || selectedConversation;
+                if (!student) {
+                    addToast('Please select a student first', 'error');
+                    return;
+                }
+                
+                setIsSending(true);
+                try {
+                    const res = await fetch(`${BACKEND_URL}/api/sms/send`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({
+                            studentId: selectedStudentId,
+                            studentName: student.studentName || student.name,
+                            studentPhone: student.studentPhone || student.phone,
+                            body: newMessage.trim(),
+                            senderName: user.name,
+                            senderId: user.id || user._id
+                        })
+                    });
+                    
+                    const data = await res.json();
+                    if (data.success) {
+                        // Add to local chat
+                        setChatMessages(prev => [...prev, data.message]);
+                        setNewMessage('');
+                        addToast('Message sent successfully', 'success');
+                    } else {
+                        addToast(data.error || 'Failed to send message', 'error');
+                    }
+                } catch (err) {
+                    console.error('Send message error:', err);
+                    addToast('Failed to send message', 'error');
+                }
+                setIsSending(false);
+            };
+            
+            // Start new conversation with a student
+            const handleStartConversation = (student) => {
+                setSelectedStudentId(student.id || student._id);
+            };
+            
+            // Format timestamp
+            const formatTime = (timestamp) => {
+                const date = new Date(timestamp);
+                const now = new Date();
+                const diffDays = Math.floor((now - date) / (1000 * 60 * 60 * 24));
+                
+                if (diffDays === 0) {
+                    return date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+                } else if (diffDays === 1) {
+                    return 'Yesterday';
+                } else if (diffDays < 7) {
+                    return date.toLocaleDateString([], { weekday: 'short' });
+                } else {
+                    return date.toLocaleDateString([], { month: 'short', day: 'numeric' });
+                }
+            };
+            
+            return (
+                <div className="bg-white rounded-2xl shadow-sm border border-slate-200/80 h-[calc(100vh-200px)] flex overflow-hidden">
+                    {/* Conversations List */}
+                    <div className="w-1/3 border-r border-slate-200 flex flex-col">
+                        <div className="p-4 border-b border-slate-200">
+                            <div className="relative">
+                                <input 
+                                    type="text" 
+                                    placeholder="Search conversations..." 
+                                    value={searchTerm}
+                                    onChange={e => setSearchTerm(e.target.value)}
+                                    className="w-full p-3 pl-10 border border-slate-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 outline-none text-sm"
+                                />
+                                <Icons.Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400" />
+                            </div>
+                        </div>
+                        
+                        <div className="flex-1 overflow-y-auto custom-scrollbar">
+                            {filteredConversations.length > 0 ? (
+                                filteredConversations.map(conv => (
+                                    <div 
+                                        key={conv.studentId || conv._id}
+                                        onClick={() => setSelectedStudentId(conv.studentId)}
+                                        className={`p-4 border-b border-slate-100 cursor-pointer hover:bg-slate-50 transition-colors ${
+                                            selectedStudentId === conv.studentId ? 'bg-indigo-50 border-l-4 border-l-indigo-500' : ''
+                                        }`}
+                                    >
+                                        <div className="flex items-center gap-3">
+                                            <StudentAvatar name={conv.studentName} size="md" />
+                                            <div className="flex-1 min-w-0">
+                                                <div className="flex justify-between items-center">
+                                                    <p className="font-semibold text-slate-800 truncate">{conv.studentName}</p>
+                                                    <span className="text-xs text-slate-400">{formatTime(conv.lastMessageTime)}</span>
+                                                </div>
+                                                <div className="flex justify-between items-center mt-1">
+                                                    <p className="text-sm text-slate-500 truncate">
+                                                        {conv.lastMessageDirection === 'outbound' && <span className="text-indigo-500">You: </span>}
+                                                        {conv.lastMessage}
+                                                    </p>
+                                                    {conv.unreadCount > 0 && (
+                                                        <span className="bg-indigo-500 text-white text-xs rounded-full px-2 py-0.5 ml-2">
+                                                            {conv.unreadCount}
+                                                        </span>
+                                                    )}
+                                                </div>
+                                            </div>
+                                        </div>
+                                    </div>
+                                ))
+                            ) : (
+                                <div className="p-4 text-center text-slate-500">
+                                    <Icons.Messages className="w-12 h-12 mx-auto mb-2 text-slate-300" />
+                                    <p>No conversations yet</p>
+                                    <p className="text-sm mt-1">Select a student below to start messaging</p>
+                                </div>
+                            )}
+                            
+                            {/* Students without conversations */}
+                            {students.length > 0 && (
+                                <div className="p-3 bg-slate-50 border-t border-slate-200">
+                                    <p className="text-xs font-semibold text-slate-500 uppercase mb-2">Start New Conversation</p>
+                                    <div className="space-y-1">
+                                        {students
+                                            .filter(s => !conversations.some(c => 
+                                                c.studentPhone === s.phone || 
+                                                String(c.studentId) === String(s.id) || 
+                                                String(c.studentId) === String(s._id)
+                                            ))
+                                            .slice(0, 5)
+                                            .map(student => (
+                                                <div 
+                                                    key={student.id || student._id}
+                                                    onClick={() => handleStartConversation(student)}
+                                                    className="flex items-center gap-2 p-2 rounded-lg hover:bg-slate-100 cursor-pointer"
+                                                >
+                                                    <StudentAvatar name={student.name} size="sm" />
+                                                    <span className="text-sm text-slate-700">{student.name}</span>
+                                                </div>
+                                            ))
+                                        }
+                                    </div>
+                                </div>
+                            )}
+                        </div>
+                    </div>
+                    
+                    {/* Chat Area */}
+                    <div className="flex-1 flex flex-col">
+                        {selectedStudentId ? (
+                            <>
+                                {/* Chat Header */}
+                                <div className="p-4 border-b border-slate-200 bg-slate-50">
+                                    <div className="flex items-center gap-3">
+                                        <StudentAvatar name={selectedConversation?.studentName || selectedStudent?.name || 'Unknown'} />
+                                        <div>
+                                            <p className="font-bold text-slate-800">
+                                                {selectedConversation?.studentName || selectedStudent?.name || 'Unknown'}
+                                            </p>
+                                            <p className="text-sm text-slate-500">
+                                                {selectedConversation?.studentPhone || selectedStudent?.phone || ''}
+                                            </p>
+                                        </div>
+                                    </div>
+                                </div>
+                                
+                                {/* Messages */}
+                                <div className="flex-1 overflow-y-auto p-4 space-y-3 custom-scrollbar bg-slate-50">
+                                    {isLoadingMessages ? (
+                                        <div className="flex justify-center items-center h-full">
+                                            <div className="animate-spin w-8 h-8 border-4 border-indigo-500 border-t-transparent rounded-full"></div>
+                                        </div>
+                                    ) : chatMessages.length > 0 ? (
+                                        chatMessages.map((msg, index) => (
+                                            <div 
+                                                key={msg._id || msg.messageSid || index}
+                                                className={`flex ${msg.direction === 'outbound' ? 'justify-end' : 'justify-start'}`}
+                                            >
+                                                <div className={`max-w-[70%] rounded-2xl px-4 py-2 ${
+                                                    msg.direction === 'outbound' 
+                                                        ? 'bg-indigo-500 text-white rounded-br-md' 
+                                                        : 'bg-white text-slate-800 border border-slate-200 rounded-bl-md'
+                                                }`}>
+                                                    <p className="text-sm">{msg.body}</p>
+                                                    <p className={`text-xs mt-1 ${
+                                                        msg.direction === 'outbound' ? 'text-indigo-200' : 'text-slate-400'
+                                                    }`}>
+                                                        {formatTime(msg.timestamp)}
+                                                        {msg.direction === 'outbound' && msg.status && (
+                                                            <span className="ml-2">
+                                                                {msg.status === 'delivered' ? '✓✓' : msg.status === 'sent' ? '✓' : ''}
+                                                            </span>
+                                                        )}
+                                                    </p>
+                                                </div>
+                                            </div>
+                                        ))
+                                    ) : (
+                                        <div className="flex flex-col justify-center items-center h-full text-slate-400">
+                                            <Icons.Messages className="w-16 h-16 mb-4" />
+                                            <p>No messages yet</p>
+                                            <p className="text-sm">Send a message to start the conversation</p>
+                                        </div>
+                                    )}
+                                    <div ref={messagesEndRef} />
+                                </div>
+                                
+                                {/* Message Input */}
+                                <div className="p-4 border-t border-slate-200 bg-white">
+                                    <div className="flex gap-2">
+                                        <input 
+                                            type="text"
+                                            value={newMessage}
+                                            onChange={e => setNewMessage(e.target.value)}
+                                            onKeyPress={e => e.key === 'Enter' && !isSending && handleSendMessage()}
+                                            placeholder="Type a message..."
+                                            className="flex-1 p-3 border border-slate-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 outline-none"
+                                            disabled={isSending}
+                                        />
+                                        <button 
+                                            onClick={handleSendMessage}
+                                            disabled={isSending || !newMessage.trim()}
+                                            className="px-4 py-3 bg-gradient-to-r from-indigo-500 to-violet-500 text-white rounded-lg hover:opacity-90 transition-opacity disabled:opacity-50 disabled:cursor-not-allowed"
+                                        >
+                                            {isSending ? (
+                                                <div className="w-5 h-5 border-2 border-white border-t-transparent rounded-full animate-spin"></div>
+                                            ) : (
+                                                <Icons.Send className="w-5 h-5" />
+                                            )}
+                                        </button>
+                                    </div>
+                                </div>
+                            </>
+                        ) : (
+                            <div className="flex-1 flex flex-col justify-center items-center text-slate-400 bg-slate-50">
+                                <Icons.Messages className="w-20 h-20 mb-4" />
+                                <p className="text-xl font-semibold text-slate-600">Select a conversation</p>
+                                <p className="text-sm mt-2">Choose a conversation from the list or start a new one</p>
+                            </div>
+                        )}
+                    </div>
                 </div>
             );
         };

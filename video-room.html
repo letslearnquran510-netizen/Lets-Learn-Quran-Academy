@@ -1,0 +1,774 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>Quran Academy - Video Class</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://sdk.twilio.com/js/video/releases/2.28.1/twilio-video.min.js"></script>
+    <style>
+        * { box-sizing: border-box; }
+        body { 
+            margin: 0; 
+            padding: 0; 
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: linear-gradient(135deg, #1e1b4b 0%, #312e81 50%, #4338ca 100%);
+            min-height: 100vh;
+        }
+        
+        .video-container {
+            position: relative;
+            width: 100%;
+            height: 100vh;
+            display: flex;
+            flex-direction: column;
+        }
+        
+        #remote-video {
+            flex: 1;
+            background: #0f0d1a;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            overflow: hidden;
+        }
+        
+        #remote-video video {
+            width: 100%;
+            height: 100%;
+            object-fit: cover;
+        }
+        
+        #local-video {
+            position: absolute;
+            bottom: 100px;
+            right: 20px;
+            width: 150px;
+            height: 200px;
+            background: #1e1b4b;
+            border-radius: 12px;
+            overflow: hidden;
+            border: 3px solid #4338ca;
+            box-shadow: 0 4px 20px rgba(0,0,0,0.3);
+            z-index: 10;
+        }
+        
+        #local-video video {
+            width: 100%;
+            height: 100%;
+            object-fit: cover;
+            transform: scaleX(-1);
+        }
+        
+        .controls {
+            position: absolute;
+            bottom: 0;
+            left: 0;
+            right: 0;
+            padding: 20px;
+            background: linear-gradient(transparent, rgba(0,0,0,0.8));
+            display: flex;
+            justify-content: center;
+            gap: 20px;
+            z-index: 20;
+        }
+        
+        .control-btn {
+            width: 60px;
+            height: 60px;
+            border-radius: 50%;
+            border: none;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            cursor: pointer;
+            transition: all 0.2s ease;
+            box-shadow: 0 4px 15px rgba(0,0,0,0.3);
+        }
+        
+        .control-btn:hover {
+            transform: scale(1.1);
+        }
+        
+        .control-btn.primary {
+            background: linear-gradient(135deg, #4338ca, #6366f1);
+            color: white;
+        }
+        
+        .control-btn.danger {
+            background: linear-gradient(135deg, #dc2626, #ef4444);
+            color: white;
+        }
+        
+        .control-btn.muted {
+            background: #374151;
+            color: #9ca3af;
+        }
+        
+        .control-btn svg {
+            width: 28px;
+            height: 28px;
+        }
+        
+        .header {
+            position: absolute;
+            top: 0;
+            left: 0;
+            right: 0;
+            padding: 20px;
+            background: linear-gradient(rgba(0,0,0,0.7), transparent);
+            z-index: 20;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+        
+        .logo {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            color: white;
+        }
+        
+        .logo-icon {
+            width: 40px;
+            height: 40px;
+            background: linear-gradient(135deg, #4338ca, #6366f1);
+            border-radius: 10px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+        
+        .call-info {
+            color: white;
+            text-align: right;
+        }
+        
+        .call-duration {
+            font-size: 1.25rem;
+            font-weight: bold;
+        }
+        
+        .call-status {
+            font-size: 0.875rem;
+            color: #a5b4fc;
+        }
+        
+        /* Join Screen */
+        .join-screen {
+            position: fixed;
+            inset: 0;
+            background: linear-gradient(135deg, #1e1b4b 0%, #312e81 50%, #4338ca 100%);
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            z-index: 100;
+            padding: 20px;
+        }
+        
+        .join-card {
+            background: white;
+            border-radius: 24px;
+            padding: 40px;
+            max-width: 400px;
+            width: 100%;
+            text-align: center;
+            box-shadow: 0 25px 50px rgba(0,0,0,0.3);
+        }
+        
+        .join-logo {
+            width: 80px;
+            height: 80px;
+            background: linear-gradient(135deg, #4338ca, #6366f1);
+            border-radius: 20px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            margin: 0 auto 24px;
+        }
+        
+        .join-logo svg {
+            width: 48px;
+            height: 48px;
+            color: white;
+        }
+        
+        .join-title {
+            font-size: 1.5rem;
+            font-weight: bold;
+            color: #1e1b4b;
+            margin-bottom: 8px;
+        }
+        
+        .join-subtitle {
+            color: #64748b;
+            margin-bottom: 32px;
+        }
+        
+        .preview-container {
+            width: 100%;
+            aspect-ratio: 4/3;
+            background: #1e1b4b;
+            border-radius: 16px;
+            overflow: hidden;
+            margin-bottom: 24px;
+            position: relative;
+        }
+        
+        #preview-video {
+            width: 100%;
+            height: 100%;
+            object-fit: cover;
+            transform: scaleX(-1);
+        }
+        
+        .preview-placeholder {
+            position: absolute;
+            inset: 0;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            color: #a5b4fc;
+        }
+        
+        .join-btn {
+            width: 100%;
+            padding: 16px 32px;
+            background: linear-gradient(135deg, #4338ca, #6366f1);
+            color: white;
+            border: none;
+            border-radius: 12px;
+            font-size: 1.125rem;
+            font-weight: bold;
+            cursor: pointer;
+            transition: all 0.2s ease;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 12px;
+        }
+        
+        .join-btn:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 10px 30px rgba(67, 56, 202, 0.4);
+        }
+        
+        .join-btn:disabled {
+            opacity: 0.6;
+            cursor: not-allowed;
+            transform: none;
+        }
+        
+        .permission-note {
+            margin-top: 16px;
+            font-size: 0.875rem;
+            color: #64748b;
+        }
+        
+        /* Waiting overlay */
+        .waiting-overlay {
+            position: absolute;
+            inset: 0;
+            background: rgba(15, 13, 26, 0.9);
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            color: white;
+            z-index: 15;
+        }
+        
+        .waiting-spinner {
+            width: 60px;
+            height: 60px;
+            border: 4px solid rgba(99, 102, 241, 0.2);
+            border-top-color: #6366f1;
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+            margin-bottom: 24px;
+        }
+        
+        @keyframes spin {
+            to { transform: rotate(360deg); }
+        }
+        
+        /* Error/Ended screen */
+        .error-screen {
+            position: fixed;
+            inset: 0;
+            background: linear-gradient(135deg, #1e1b4b 0%, #312e81 50%, #4338ca 100%);
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            z-index: 100;
+            padding: 20px;
+            text-align: center;
+            color: white;
+        }
+        
+        .error-icon {
+            width: 80px;
+            height: 80px;
+            background: rgba(239, 68, 68, 0.2);
+            border-radius: 50%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            margin-bottom: 24px;
+        }
+        
+        .error-icon svg {
+            width: 40px;
+            height: 40px;
+            color: #ef4444;
+        }
+        
+        .ended-icon {
+            width: 80px;
+            height: 80px;
+            background: rgba(34, 197, 94, 0.2);
+            border-radius: 50%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            margin-bottom: 24px;
+        }
+        
+        .ended-icon svg {
+            width: 40px;
+            height: 40px;
+            color: #22c55e;
+        }
+        
+        /* Responsive */
+        @media (max-width: 640px) {
+            #local-video {
+                width: 100px;
+                height: 133px;
+                bottom: 90px;
+                right: 10px;
+            }
+            
+            .control-btn {
+                width: 50px;
+                height: 50px;
+            }
+            
+            .control-btn svg {
+                width: 24px;
+                height: 24px;
+            }
+            
+            .join-card {
+                padding: 24px;
+            }
+        }
+    </style>
+</head>
+<body>
+    <!-- Join Screen -->
+    <div id="join-screen" class="join-screen">
+        <div class="join-card">
+            <div class="join-logo">
+                <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
+                    <path stroke-linecap="round" stroke-linejoin="round" d="m15.75 10.5 4.72-4.72a.75.75 0 0 1 1.28.53v11.38a.75.75 0 0 1-1.28.53l-4.72-4.72M4.5 18.75h9a2.25 2.25 0 0 0 2.25-2.25v-9a2.25 2.25 0 0 0-2.25-2.25h-9A2.25 2.25 0 0 0 2.25 7.5v9a2.25 2.25 0 0 0 2.25 2.25Z" />
+                </svg>
+            </div>
+            <h1 class="join-title">Quran Academy</h1>
+            <p class="join-subtitle" id="join-subtitle">Your teacher is waiting for you</p>
+            
+            <div class="preview-container">
+                <video id="preview-video" autoplay muted playsinline></video>
+                <div class="preview-placeholder" id="preview-placeholder">
+                    <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" style="width:48px;height:48px;margin-bottom:12px;">
+                        <path stroke-linecap="round" stroke-linejoin="round" d="m15.75 10.5 4.72-4.72a.75.75 0 0 1 1.28.53v11.38a.75.75 0 0 1-1.28.53l-4.72-4.72M4.5 18.75h9a2.25 2.25 0 0 0 2.25-2.25v-9a2.25 2.25 0 0 0-2.25-2.25h-9A2.25 2.25 0 0 0 2.25 7.5v9a2.25 2.25 0 0 0 2.25 2.25Z" />
+                    </svg>
+                    <p>Camera preview</p>
+                </div>
+            </div>
+            
+            <button id="join-btn" class="join-btn" onclick="joinRoom()">
+                <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor" style="width:24px;height:24px;">
+                    <path stroke-linecap="round" stroke-linejoin="round" d="m15.75 10.5 4.72-4.72a.75.75 0 0 1 1.28.53v11.38a.75.75 0 0 1-1.28.53l-4.72-4.72M4.5 18.75h9a2.25 2.25 0 0 0 2.25-2.25v-9a2.25 2.25 0 0 0-2.25-2.25h-9A2.25 2.25 0 0 0 2.25 7.5v9a2.25 2.25 0 0 0 2.25 2.25Z" />
+                </svg>
+                <span id="join-btn-text">Join Video Class</span>
+            </button>
+            
+            <p class="permission-note">Please allow camera and microphone access</p>
+        </div>
+    </div>
+    
+    <!-- Video Call Screen -->
+    <div id="video-screen" class="video-container" style="display: none;">
+        <div class="header">
+            <div class="logo">
+                <div class="logo-icon">
+                    <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" style="width:24px;height:24px;color:white;">
+                        <path stroke-linecap="round" stroke-linejoin="round" d="M12 6.042A8.967 8.967 0 0 0 6 3.75c-1.052 0-2.062.18-3 .512v14.25A8.987 8.987 0 0 1 6 18c2.305 0 4.408.867 6 2.292m0-14.25a8.966 8.966 0 0 1 6-2.292c1.052 0 2.062.18 3 .512v14.25A8.987 8.987 0 0 0 18 18a8.967 8.967 0 0 0-6 2.292m0-14.25v14.25" />
+                    </svg>
+                </div>
+                <div>
+                    <div style="font-weight: bold;">Quran Academy</div>
+                    <div style="font-size: 0.875rem; opacity: 0.8;">Video Class</div>
+                </div>
+            </div>
+            <div class="call-info">
+                <div class="call-duration" id="call-duration">00:00</div>
+                <div class="call-status" id="call-status">Connected</div>
+            </div>
+        </div>
+        
+        <div id="remote-video">
+            <div class="waiting-overlay" id="waiting-overlay">
+                <div class="waiting-spinner"></div>
+                <p style="font-size: 1.25rem; margin-bottom: 8px;">Waiting for teacher...</p>
+                <p style="opacity: 0.7;">Your teacher will join shortly</p>
+            </div>
+        </div>
+        
+        <div id="local-video"></div>
+        
+        <div class="controls">
+            <button class="control-btn primary" id="mic-btn" onclick="toggleMic()">
+                <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
+                    <path stroke-linecap="round" stroke-linejoin="round" d="M12 18.75a6 6 0 0 0 6-6v-1.5m-6 7.5a6 6 0 0 1-6-6v-1.5m6 7.5v3.75m-3.75 0h7.5M12 15.75a3 3 0 0 1-3-3V4.5a3 3 0 1 1 6 0v8.25a3 3 0 0 1-3 3Z" />
+                </svg>
+            </button>
+            <button class="control-btn danger" onclick="endCall()">
+                <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
+                    <path stroke-linecap="round" stroke-linejoin="round" d="M15.75 3.75 18 6m0 0 2.25 2.25M18 6l2.25-2.25M18 6l-2.25 2.25m1.5 13.5c-8.284 0-15-6.716-15-15V4.5A2.25 2.25 0 0 1 4.5 2.25h1.372c.516 0 .966.351 1.091.852l1.106 4.423c.11.44-.054.902-.417 1.173l-1.293.97a1.062 1.062 0 0 0-.38 1.21 12.035 12.035 0 0 0 7.143 7.143c.441.162.928-.004 1.21-.38l.97-1.293a1.125 1.125 0 0 1 1.173-.417l4.423 1.106c.5.125.852.575.852 1.091V19.5a2.25 2.25 0 0 1-2.25 2.25h-2.25Z" />
+                </svg>
+            </button>
+            <button class="control-btn primary" id="camera-btn" onclick="toggleCamera()">
+                <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
+                    <path stroke-linecap="round" stroke-linejoin="round" d="m15.75 10.5 4.72-4.72a.75.75 0 0 1 1.28.53v11.38a.75.75 0 0 1-1.28.53l-4.72-4.72M4.5 18.75h9a2.25 2.25 0 0 0 2.25-2.25v-9a2.25 2.25 0 0 0-2.25-2.25h-9A2.25 2.25 0 0 0 2.25 7.5v9a2.25 2.25 0 0 0 2.25 2.25Z" />
+                </svg>
+            </button>
+        </div>
+    </div>
+    
+    <!-- Error Screen -->
+    <div id="error-screen" class="error-screen" style="display: none;">
+        <div class="error-icon">
+            <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
+                <path stroke-linecap="round" stroke-linejoin="round" d="M12 9v3.75m9-.75a9 9 0 1 1-18 0 9 9 0 0 1 18 0Zm-9 3.75h.008v.008H12v-.008Z" />
+            </svg>
+        </div>
+        <h2 style="font-size: 1.5rem; margin-bottom: 12px;" id="error-title">Connection Error</h2>
+        <p style="opacity: 0.8; max-width: 300px;" id="error-message">Unable to connect to the video call. Please try again.</p>
+    </div>
+    
+    <!-- Call Ended Screen -->
+    <div id="ended-screen" class="error-screen" style="display: none;">
+        <div class="ended-icon">
+            <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
+                <path stroke-linecap="round" stroke-linejoin="round" d="M9 12.75 11.25 15 15 9.75M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0Z" />
+            </svg>
+        </div>
+        <h2 style="font-size: 1.5rem; margin-bottom: 12px;">Class Ended</h2>
+        <p style="opacity: 0.8; margin-bottom: 24px;">Thank you for attending the video class.</p>
+        <p style="font-size: 0.875rem; opacity: 0.6;" id="call-summary"></p>
+    </div>
+
+    <script>
+        // Get URL parameters
+        const urlParams = new URLSearchParams(window.location.search);
+        const roomName = urlParams.get('room');
+        const studentName = urlParams.get('name') || 'Student';
+        
+        // API base URL
+        const API_URL = window.location.origin;
+        
+        // State
+        let room = null;
+        let localTracks = [];
+        let isMicMuted = false;
+        let isCameraOff = false;
+        let callStartTime = null;
+        let durationInterval = null;
+        let previewStream = null;
+        
+        // Initialize
+        document.addEventListener('DOMContentLoaded', () => {
+            if (!roomName) {
+                showError('Invalid Link', 'This video call link is invalid or has expired.');
+                return;
+            }
+            
+            document.getElementById('join-subtitle').textContent = 
+                `Welcome ${studentName}! Your teacher is waiting.`;
+            
+            // Start camera preview
+            startPreview();
+        });
+        
+        // Start camera preview
+        async function startPreview() {
+            try {
+                previewStream = await navigator.mediaDevices.getUserMedia({ 
+                    video: true, 
+                    audio: true 
+                });
+                
+                const previewVideo = document.getElementById('preview-video');
+                previewVideo.srcObject = previewStream;
+                document.getElementById('preview-placeholder').style.display = 'none';
+                
+            } catch (err) {
+                console.error('Preview error:', err);
+                document.getElementById('preview-placeholder').innerHTML = `
+                    <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" style="width:48px;height:48px;margin-bottom:12px;color:#ef4444;">
+                        <path stroke-linecap="round" stroke-linejoin="round" d="m15.75 10.5 4.72-4.72a.75.75 0 0 1 1.28.53v11.38a.75.75 0 0 1-1.28.53l-4.72-4.72M12 18.75H4.5a2.25 2.25 0 0 1-2.25-2.25V9m12.841 9.091L16.5 19.5m-1.409-1.409c.407-.407.659-.97.659-1.591v-9a2.25 2.25 0 0 0-2.25-2.25h-9c-.621 0-1.184.252-1.591.659m12.182 12.182L2.909 5.909M1.5 4.5l1.409 1.409" />
+                    </svg>
+                    <p style="color:#ef4444;">Camera access denied</p>
+                    <p style="font-size:0.875rem;margin-top:8px;">Please allow camera access to join</p>
+                `;
+            }
+        }
+        
+        // Join the video room
+        async function joinRoom() {
+            const joinBtn = document.getElementById('join-btn');
+            const joinBtnText = document.getElementById('join-btn-text');
+            
+            joinBtn.disabled = true;
+            joinBtnText.textContent = 'Connecting...';
+            
+            try {
+                // Get token from server
+                const response = await fetch(`${API_URL}/api/video/join/${roomName}?name=${encodeURIComponent(studentName)}`);
+                const data = await response.json();
+                
+                if (!data.success) {
+                    throw new Error(data.error || 'Failed to join room');
+                }
+                
+                // Stop preview stream
+                if (previewStream) {
+                    previewStream.getTracks().forEach(track => track.stop());
+                }
+                
+                // Connect to room
+                room = await Twilio.Video.connect(data.token, {
+                    name: roomName,
+                    audio: true,
+                    video: { width: 640, height: 480 }
+                });
+                
+                console.log('Connected to room:', room.name);
+                
+                // Show video screen
+                document.getElementById('join-screen').style.display = 'none';
+                document.getElementById('video-screen').style.display = 'flex';
+                
+                // Start call timer
+                callStartTime = Date.now();
+                durationInterval = setInterval(updateDuration, 1000);
+                
+                // Handle local tracks
+                room.localParticipant.tracks.forEach(publication => {
+                    if (publication.track) {
+                        localTracks.push(publication.track);
+                        if (publication.track.kind === 'video') {
+                            const localContainer = document.getElementById('local-video');
+                            localContainer.appendChild(publication.track.attach());
+                        }
+                    }
+                });
+                
+                // Handle existing participants
+                room.participants.forEach(handleParticipantConnected);
+                
+                // Handle new participants
+                room.on('participantConnected', handleParticipantConnected);
+                room.on('participantDisconnected', handleParticipantDisconnected);
+                
+                // Handle room disconnection
+                room.on('disconnected', () => {
+                    console.log('Disconnected from room');
+                    showEnded();
+                });
+                
+            } catch (err) {
+                console.error('Join error:', err);
+                joinBtn.disabled = false;
+                joinBtnText.textContent = 'Join Video Class';
+                
+                if (err.message.includes('not configured')) {
+                    showError('Video Not Available', 'Video calling is not configured. Please contact your teacher.');
+                } else if (err.message.includes('not found') || err.message.includes('expired')) {
+                    showError('Room Not Found', 'This video call has ended or the link has expired.');
+                } else if (err.message.includes('permission') || err.message.includes('NotAllowed')) {
+                    showError('Permission Denied', 'Please allow camera and microphone access to join the video call.');
+                } else {
+                    showError('Connection Failed', err.message || 'Unable to connect. Please check your internet connection.');
+                }
+            }
+        }
+        
+        // Handle participant connected
+        function handleParticipantConnected(participant) {
+            console.log('Participant connected:', participant.identity);
+            
+            // Hide waiting overlay
+            document.getElementById('waiting-overlay').style.display = 'none';
+            document.getElementById('call-status').textContent = `With ${participant.identity}`;
+            
+            // Handle existing tracks
+            participant.tracks.forEach(publication => {
+                if (publication.isSubscribed && publication.track) {
+                    handleTrackSubscribed(publication.track);
+                }
+            });
+            
+            // Handle new tracks
+            participant.on('trackSubscribed', handleTrackSubscribed);
+            participant.on('trackUnsubscribed', handleTrackUnsubscribed);
+        }
+        
+        // Handle participant disconnected
+        function handleParticipantDisconnected(participant) {
+            console.log('Participant disconnected:', participant.identity);
+            document.getElementById('waiting-overlay').style.display = 'flex';
+            document.getElementById('call-status').textContent = 'Teacher left';
+        }
+        
+        // Handle track subscribed
+        function handleTrackSubscribed(track) {
+            const remoteContainer = document.getElementById('remote-video');
+            
+            if (track.kind === 'video' || track.kind === 'audio') {
+                remoteContainer.appendChild(track.attach());
+            }
+        }
+        
+        // Handle track unsubscribed
+        function handleTrackUnsubscribed(track) {
+            track.detach().forEach(element => element.remove());
+        }
+        
+        // Toggle microphone
+        function toggleMic() {
+            const micBtn = document.getElementById('mic-btn');
+            
+            room.localParticipant.audioTracks.forEach(publication => {
+                if (isMicMuted) {
+                    publication.track.enable();
+                    micBtn.classList.remove('muted');
+                    micBtn.classList.add('primary');
+                    micBtn.innerHTML = `
+                        <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
+                            <path stroke-linecap="round" stroke-linejoin="round" d="M12 18.75a6 6 0 0 0 6-6v-1.5m-6 7.5a6 6 0 0 1-6-6v-1.5m6 7.5v3.75m-3.75 0h7.5M12 15.75a3 3 0 0 1-3-3V4.5a3 3 0 1 1 6 0v8.25a3 3 0 0 1-3 3Z" />
+                        </svg>
+                    `;
+                } else {
+                    publication.track.disable();
+                    micBtn.classList.add('muted');
+                    micBtn.classList.remove('primary');
+                    micBtn.innerHTML = `
+                        <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
+                            <path stroke-linecap="round" stroke-linejoin="round" d="M12 18.75a6 6 0 0 0 6-6v-1.5m-6 7.5a6 6 0 0 1-6-6v-1.5m6 7.5v3.75m-3.75 0h7.5M12 15.75a3 3 0 0 1-3-3V4.5a3 3 0 1 1 6 0v8.25a3 3 0 0 1-3 3Z" />
+                            <path stroke-linecap="round" stroke-linejoin="round" d="M3 3l18 18" stroke="currentColor" stroke-width="2" />
+                        </svg>
+                    `;
+                }
+            });
+            
+            isMicMuted = !isMicMuted;
+        }
+        
+        // Toggle camera
+        function toggleCamera() {
+            const cameraBtn = document.getElementById('camera-btn');
+            
+            room.localParticipant.videoTracks.forEach(publication => {
+                if (isCameraOff) {
+                    publication.track.enable();
+                    cameraBtn.classList.remove('muted');
+                    cameraBtn.classList.add('primary');
+                    cameraBtn.innerHTML = `
+                        <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
+                            <path stroke-linecap="round" stroke-linejoin="round" d="m15.75 10.5 4.72-4.72a.75.75 0 0 1 1.28.53v11.38a.75.75 0 0 1-1.28.53l-4.72-4.72M4.5 18.75h9a2.25 2.25 0 0 0 2.25-2.25v-9a2.25 2.25 0 0 0-2.25-2.25h-9A2.25 2.25 0 0 0 2.25 7.5v9a2.25 2.25 0 0 0 2.25 2.25Z" />
+                        </svg>
+                    `;
+                } else {
+                    publication.track.disable();
+                    cameraBtn.classList.add('muted');
+                    cameraBtn.classList.remove('primary');
+                    cameraBtn.innerHTML = `
+                        <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
+                            <path stroke-linecap="round" stroke-linejoin="round" d="m15.75 10.5 4.72-4.72a.75.75 0 0 1 1.28.53v11.38a.75.75 0 0 1-1.28.53l-4.72-4.72M12 18.75H4.5a2.25 2.25 0 0 1-2.25-2.25V9m12.841 9.091L16.5 19.5m-1.409-1.409c.407-.407.659-.97.659-1.591v-9a2.25 2.25 0 0 0-2.25-2.25h-9c-.621 0-1.184.252-1.591.659m12.182 12.182L2.909 5.909M1.5 4.5l1.409 1.409" />
+                        </svg>
+                    `;
+                }
+            });
+            
+            isCameraOff = !isCameraOff;
+        }
+        
+        // End call
+        function endCall() {
+            if (room) {
+                room.disconnect();
+            }
+            showEnded();
+        }
+        
+        // Update duration display
+        function updateDuration() {
+            if (!callStartTime) return;
+            
+            const elapsed = Math.floor((Date.now() - callStartTime) / 1000);
+            const mins = Math.floor(elapsed / 60).toString().padStart(2, '0');
+            const secs = (elapsed % 60).toString().padStart(2, '0');
+            
+            document.getElementById('call-duration').textContent = `${mins}:${secs}`;
+        }
+        
+        // Show error screen
+        function showError(title, message) {
+            document.getElementById('join-screen').style.display = 'none';
+            document.getElementById('video-screen').style.display = 'none';
+            document.getElementById('ended-screen').style.display = 'none';
+            document.getElementById('error-screen').style.display = 'flex';
+            document.getElementById('error-title').textContent = title;
+            document.getElementById('error-message').textContent = message;
+        }
+        
+        // Show ended screen
+        function showEnded() {
+            if (durationInterval) clearInterval(durationInterval);
+            
+            // Clean up tracks
+            localTracks.forEach(track => {
+                track.stop();
+                track.detach().forEach(el => el.remove());
+            });
+            
+            document.getElementById('join-screen').style.display = 'none';
+            document.getElementById('video-screen').style.display = 'none';
+            document.getElementById('error-screen').style.display = 'none';
+            document.getElementById('ended-screen').style.display = 'flex';
+            
+            if (callStartTime) {
+                const duration = Math.floor((Date.now() - callStartTime) / 1000);
+                const mins = Math.floor(duration / 60);
+                const secs = duration % 60;
+                document.getElementById('call-summary').textContent = 
+                    `Call duration: ${mins} minute${mins !== 1 ? 's' : ''} ${secs} second${secs !== 1 ? 's' : ''}`;
+            }
+        }
+        
+        // Handle page unload
+        window.addEventListener('beforeunload', () => {
+            if (room) {
+                room.disconnect();
+            }
+        });
+    </script>
+</body>
+</html>

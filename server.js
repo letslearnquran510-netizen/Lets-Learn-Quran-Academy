@@ -929,10 +929,10 @@ app.post('/api/video/create-room', async (req, res) => {
         const roomName = generateRoomName();
         const joinUrl = `${config.publicUrl}/video-room.html?room=${roomName}&name=${encodeURIComponent(studentName)}`;
         
-        // Generate teacher token
+        // Generate teacher token FIRST (fast operation)
         const teacherToken = generateVideoToken(teacherName || 'Teacher', roomName);
         
-        // Save room to database
+        // Room data
         const roomData = {
             roomName,
             studentId: studentId || studentPhone,
@@ -945,21 +945,7 @@ app.post('/api/video/create-room', async (req, res) => {
             startedAt: new Date()
         };
         
-        let savedRoom;
-        if (isDbConnected()) {
-            try {
-                savedRoom = await VideoRoom.create(roomData);
-                console.log('✅ Room saved to database:', roomName);
-            } catch (dbErr) {
-                console.error('⚠️ Failed to save room to database:', dbErr.message);
-                savedRoom = { ...roomData, _id: Date.now().toString() };
-            }
-        } else {
-            savedRoom = { ...roomData, _id: Date.now().toString() };
-            console.log('⚠️ Room NOT saved to database (no connection)');
-        }
-        
-        // Track active room - teacher is joining immediately
+        // ⚡ IMMEDIATELY track active room in memory (no waiting)
         activeVideoRooms.set(roomName, {
             ...roomData,
             teacherJoined: true,
@@ -969,24 +955,35 @@ app.post('/api/video/create-room', async (req, res) => {
         console.log('✅ Room added to active rooms:', roomName);
         console.log('   Total active rooms:', activeVideoRooms.size);
         
-        // Send SMS invitation to student
+        // ⚡ SEND SMS IMMEDIATELY - Don't wait for database!
+        // Fire SMS in background - don't await
         if (twilioClient) {
-            try {
-                const smsBody = `Assalam Alaikum ${studentName}! Your teacher is waiting for you in a video class. Join now: ${joinUrl}`;
-                
-                await twilioClient.messages.create({
-                    body: smsBody,
-                    from: config.twilio.phoneNumber,
-                    to: studentPhone
-                });
-                
+            const smsBody = `Assalam Alaikum ${studentName}! Your teacher is waiting for you in a video class. Join now: ${joinUrl}`;
+            
+            twilioClient.messages.create({
+                body: smsBody,
+                from: config.twilio.phoneNumber,
+                to: studentPhone
+            }).then(() => {
                 console.log('✅ SMS invitation sent to student');
-            } catch (smsErr) {
+            }).catch((smsErr) => {
                 console.error('⚠️ Failed to send SMS invitation:', smsErr.message);
-                // Continue even if SMS fails - teacher can share link manually
-            }
+            });
+            
+            console.log('📤 SMS sending initiated (not waiting)');
         }
         
+        // Save to database in background - don't await
+        if (isDbConnected()) {
+            VideoRoom.create(roomData).then(() => {
+                console.log('✅ Room saved to database:', roomName);
+            }).catch((dbErr) => {
+                console.error('⚠️ Failed to save room to database:', dbErr.message);
+            });
+        }
+        
+        // ⚡ RESPOND IMMEDIATELY to frontend
+        // Teacher can start connecting while SMS is being sent
         console.log('✅ Video room created:', roomName);
         console.log('   Join URL:', joinUrl);
         
@@ -1004,7 +1001,9 @@ app.post('/api/video/create-room', async (req, res) => {
         
     } catch (err) {
         console.error('❌ Create video room error:', err);
-        res.status(500).json({ success: false, error: err.message || 'Failed to create video room' });
+        if (!res.headersSent) {
+            res.status(500).json({ success: false, error: err.message || 'Failed to create video room' });
+        }
     }
 });
 

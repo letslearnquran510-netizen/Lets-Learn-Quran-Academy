@@ -1370,6 +1370,8 @@
             let pingInterval = null;
             let onStatusUpdate = null;
             let onSmsMessage = null;
+            let onIncomingCall = null;
+            let onIncomingCallStatus = null;
             let subscribedCallSid = null;
             let isConnected = false;
 
@@ -1408,6 +1410,16 @@
                             
                             if (data.type === 'NEW_SMS_MESSAGE' && onSmsMessage) {
                                 onSmsMessage(data.message);
+                            }
+                            
+                            if (data.type === 'INCOMING_CALL' && onIncomingCall) {
+                                console.log('📞 INCOMING CALL:', data.call);
+                                onIncomingCall(data.call);
+                            }
+                            
+                            if (data.type === 'INCOMING_CALL_STATUS' && onIncomingCallStatus) {
+                                console.log('📞 Incoming call status:', data.status);
+                                onIncomingCallStatus(data);
                             }
                         } catch (e) {
                             console.error('WS message parse error:', e);
@@ -1452,6 +1464,14 @@
                 onSmsMessage = handler;
             };
             
+            const setIncomingCallHandler = (handler) => {
+                onIncomingCall = handler;
+            };
+            
+            const setIncomingCallStatusHandler = (handler) => {
+                onIncomingCallStatus = handler;
+            };
+            
             const disconnect = () => {
                 if (reconnectTimeout) clearTimeout(reconnectTimeout);
                 if (pingInterval) clearInterval(pingInterval);
@@ -1462,7 +1482,7 @@
             
             const getIsConnected = () => isConnected;
             
-            return { connect, subscribeToCall, unsubscribe, setStatusHandler, setSmsHandler, disconnect, getIsConnected };
+            return { connect, subscribeToCall, unsubscribe, setStatusHandler, setSmsHandler, setIncomingCallHandler, setIncomingCallStatusHandler, disconnect, getIsConnected };
         };
 
         // Global WebSocket manager instance
@@ -2072,6 +2092,11 @@
                 finishReason: ''
             });
 
+            // Incoming call state
+            const [incomingCall, setIncomingCall] = useState(null);
+            const [isAnsweringCall, setIsAnsweringCall] = useState(false);
+            const incomingCallAudioRef = useRef(null);
+
             // Refs for managing intervals, timeouts, and mutable state
             const timerRef = useRef(null);
             const pollIntervalRef = useRef(null);
@@ -2189,9 +2214,54 @@
                     }
                 });
                 
+                // Set up the incoming call handler
+                wsManager.setIncomingCallHandler((call) => {
+                    console.log('📞 INCOMING CALL RECEIVED:', call);
+                    setIncomingCall(call);
+                    
+                    // Play ringtone
+                    try {
+                        if (incomingCallAudioRef.current) {
+                            incomingCallAudioRef.current.pause();
+                        }
+                        incomingCallAudioRef.current = new Audio('https://assets.mixkit.co/active_storage/sfx/2869/2869-preview.mp3');
+                        incomingCallAudioRef.current.loop = true;
+                        incomingCallAudioRef.current.volume = 0.5;
+                        incomingCallAudioRef.current.play().catch(e => console.log('Audio play prevented:', e));
+                    } catch (e) {
+                        console.error('Ringtone error:', e);
+                    }
+                    
+                    // Show notification
+                    addToast(`📞 Incoming call from ${call.callerName}!`, 'info');
+                });
+                
+                // Set up incoming call status handler
+                wsManager.setIncomingCallStatusHandler((data) => {
+                    console.log('📞 Incoming call status update:', data);
+                    
+                    // Stop ringtone
+                    if (incomingCallAudioRef.current) {
+                        incomingCallAudioRef.current.pause();
+                        incomingCallAudioRef.current = null;
+                    }
+                    
+                    if (data.status === 'answered' || data.status === 'rejected' || data.status === 'missed' || data.status === 'completed' || data.status === 'canceled') {
+                        setIncomingCall(null);
+                        setIsAnsweringCall(false);
+                        
+                        if (data.status === 'missed') {
+                            addToast(`Missed call from ${data.callerName}`, 'warning');
+                        }
+                    }
+                });
+                
                 // Cleanup on unmount
                 return () => {
                     wsManager.disconnect();
+                    if (incomingCallAudioRef.current) {
+                        incomingCallAudioRef.current.pause();
+                    }
                 };
             }, []);
 
@@ -2412,6 +2482,77 @@
                 
                 setCallState(s => ({ ...s, status: 'finished', duration, finishReason: 'Call Transferred', sid: null }));
             };
+
+            // --- Incoming Call Handlers ---
+            const handleAnswerIncomingCall = useCallback(async () => {
+                if (!incomingCall) return;
+                
+                setIsAnsweringCall(true);
+                
+                // Stop ringtone
+                if (incomingCallAudioRef.current) {
+                    incomingCallAudioRef.current.pause();
+                    incomingCallAudioRef.current = null;
+                }
+                
+                try {
+                    const response = await fetch(`${BACKEND_URL}/api/inbound-call/answer`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({
+                            callSid: incomingCall.callSid,
+                            answeredBy: user.name
+                        })
+                    });
+                    
+                    const data = await response.json();
+                    
+                    if (data.success) {
+                        addToast(`Call answered! Connected to ${incomingCall.callerName}`, 'success');
+                        setIncomingCall(null);
+                    } else {
+                        addToast(data.error || 'Failed to answer call', 'error');
+                    }
+                } catch (error) {
+                    console.error('Error answering call:', error);
+                    addToast('Failed to answer call', 'error');
+                }
+                
+                setIsAnsweringCall(false);
+            }, [incomingCall, user.name, addToast]);
+            
+            const handleRejectIncomingCall = useCallback(async (reason) => {
+                if (!incomingCall) return;
+                
+                // Stop ringtone
+                if (incomingCallAudioRef.current) {
+                    incomingCallAudioRef.current.pause();
+                    incomingCallAudioRef.current = null;
+                }
+                
+                try {
+                    const response = await fetch(`${BACKEND_URL}/api/inbound-call/reject`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({
+                            callSid: incomingCall.callSid,
+                            reason: reason || 'We are currently unavailable. Please try again later.'
+                        })
+                    });
+                    
+                    const data = await response.json();
+                    
+                    if (data.success) {
+                        addToast(`Call from ${incomingCall.callerName} declined`, 'info');
+                        setIncomingCall(null);
+                    } else {
+                        addToast(data.error || 'Failed to decline call', 'error');
+                    }
+                } catch (error) {
+                    console.error('Error rejecting call:', error);
+                    addToast('Failed to decline call', 'error');
+                }
+            }, [incomingCall, addToast]);
 
             const initiateCall = useCallback(async (student) => {
                 if (!student || callStateRef.current.status !== 'idle') {
@@ -2721,12 +2862,97 @@
                             darkMode={darkMode}
                         />
                     )}
+                    {incomingCall && (
+                        <IncomingCallModal
+                            call={incomingCall}
+                            onAnswer={handleAnswerIncomingCall}
+                            onReject={handleRejectIncomingCall}
+                            isAnswering={isAnsweringCall}
+                            user={user}
+                        />
+                    )}
                 </div>
             );
         };
 
 
         // --- Sub-components for Dashboard ---
+
+        // Incoming Call Modal Component
+        const IncomingCallModal = ({ call, onAnswer, onReject, isAnswering, user }) => {
+            const [elapsedTime, setElapsedTime] = useState(0);
+            
+            useEffect(() => {
+                const interval = setInterval(() => {
+                    setElapsedTime(Math.floor((Date.now() - call.startTime) / 1000));
+                }, 1000);
+                return () => clearInterval(interval);
+            }, [call.startTime]);
+            
+            const formatTime = (seconds) => {
+                const mins = Math.floor(seconds / 60);
+                const secs = seconds % 60;
+                return `${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
+            };
+            
+            return (
+                <>
+                    <div className="fixed inset-0 bg-black bg-opacity-50 z-50 animate-fade-in"></div>
+                    <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+                        <div className="bg-white rounded-3xl shadow-2xl w-full max-w-sm overflow-hidden animate-fade-in">
+                            {/* Green Header */}
+                            <div className="bg-gradient-to-r from-green-500 to-emerald-500 p-6 text-center text-white">
+                                <div className="flex justify-center mb-4">
+                                    <div className="w-20 h-20 bg-white/20 rounded-full flex items-center justify-center animate-pulse">
+                                        <Icons.Phone className="w-10 h-10 text-white" />
+                                    </div>
+                                </div>
+                                <h2 className="text-2xl font-bold mb-1">Incoming Call</h2>
+                                <p className="text-white/80 text-sm">Ringing for {formatTime(elapsedTime)}</p>
+                            </div>
+                            
+                            {/* Caller Info */}
+                            <div className="p-6 text-center">
+                                <div className="mb-4">
+                                    <StudentAvatar name={call.callerName} size="lg" />
+                                </div>
+                                <h3 className="text-2xl font-bold text-slate-800 mb-1">{call.callerName}</h3>
+                                {user.type === 'admin' && (
+                                    <p className="text-slate-500 text-lg mb-2">{call.from}</p>
+                                )}
+                                <p className="text-slate-400 text-sm">
+                                    {call.studentId ? '📚 Student' : '👤 Unknown Caller'}
+                                </p>
+                            </div>
+                            
+                            {/* Action Buttons */}
+                            <div className="p-6 pt-0 flex gap-4">
+                                <button
+                                    onClick={() => onReject()}
+                                    disabled={isAnswering}
+                                    className="flex-1 py-4 bg-red-500 text-white font-bold rounded-2xl hover:bg-red-600 transition-colors flex items-center justify-center gap-2 disabled:opacity-50"
+                                >
+                                    <Icons.Phone className="w-6 h-6" style={{ transform: 'rotate(135deg)' }} />
+                                    <span>Decline</span>
+                                </button>
+                                <button
+                                    onClick={onAnswer}
+                                    disabled={isAnswering}
+                                    className="flex-1 py-4 bg-green-500 text-white font-bold rounded-2xl hover:bg-green-600 transition-colors flex items-center justify-center gap-2 disabled:opacity-50"
+                                >
+                                    {isAnswering ? (
+                                        <div className="w-6 h-6 border-2 border-white border-t-transparent rounded-full animate-spin"></div>
+                                    ) : (
+                                        <Icons.Phone className="w-6 h-6" />
+                                    )}
+                                    <span>{isAnswering ? 'Connecting...' : 'Answer'}</span>
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+                </>
+            );
+        };
 
         const TopBar = ({ title, subtitle, user, onLogout, onMenuClick, darkMode, toggleDarkMode }) => {
             return (

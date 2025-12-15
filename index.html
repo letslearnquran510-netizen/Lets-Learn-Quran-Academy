@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Quran Academy-Professional System</title>
+    <title>Quran Academy - Professional System</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <style>
       /* Custom scrollbar for webkit browsers */
@@ -20,6 +20,16 @@
       }
       .custom-scrollbar::-webkit-scrollbar-thumb:hover {
         background: #4f46e5; /* indigo-600 */
+      }
+      /* Dark mode scrollbar */
+      .dark .custom-scrollbar::-webkit-scrollbar-track {
+        background: #1e293b; /* slate-800 */
+      }
+      .dark .custom-scrollbar::-webkit-scrollbar-thumb {
+        background: #818cf8; /* indigo-400 */
+      }
+      .dark .custom-scrollbar::-webkit-scrollbar-thumb:hover {
+        background: #a5b4fc; /* indigo-300 */
       }
       /* Animation for list items */
       @keyframes fadeIn {
@@ -46,6 +56,49 @@
       }
       .animate-pulse-colon {
         animation: pulse-colon 1.5s infinite;
+      }
+      
+      /* ========== DARK MODE STYLES ========== */
+      /* Dark mode toggle switch */
+      .theme-toggle {
+        position: relative;
+        width: 56px;
+        height: 28px;
+        border-radius: 9999px;
+        cursor: pointer;
+        transition: all 0.3s ease;
+      }
+      .theme-toggle-light {
+        background: linear-gradient(135deg, #fbbf24 0%, #f59e0b 100%);
+        box-shadow: 0 2px 8px rgba(251, 191, 36, 0.4);
+      }
+      .theme-toggle-dark {
+        background: linear-gradient(135deg, #3b82f6 0%, #1e40af 100%);
+        box-shadow: 0 2px 8px rgba(59, 130, 246, 0.4);
+      }
+      .theme-toggle-knob {
+        position: absolute;
+        top: 2px;
+        width: 24px;
+        height: 24px;
+        border-radius: 50%;
+        background: white;
+        box-shadow: 0 2px 4px rgba(0,0,0,0.2);
+        transition: all 0.3s ease;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+      }
+      .theme-toggle-knob-light {
+        left: 2px;
+      }
+      .theme-toggle-knob-dark {
+        left: 30px;
+      }
+      
+      /* Dark mode base transitions */
+      .dark-transition {
+        transition: background-color 0.3s ease, border-color 0.3s ease, color 0.3s ease;
       }
     </style>
 <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
@@ -662,24 +715,24 @@
         };
 
 
-        const EmptyState = ({ icon, message, description, action }) => (
-            <div className="text-center py-16 px-6 bg-slate-50 rounded-2xl border-2 border-dashed border-slate-200 animate-fade-in">
-                <div className="text-5xl mb-4 text-slate-400">{icon}</div>
-                <h3 className="text-lg font-bold text-slate-700">{message}</h3>
-                <p className="text-slate-500 max-w-md mx-auto">{description}</p>
+        const EmptyState = ({ icon, message, description, action, darkMode }) => (
+            <div className={`text-center py-16 px-6 rounded-2xl border-2 border-dashed animate-fade-in dark-transition ${darkMode ? 'bg-slate-700/30 border-slate-600' : 'bg-slate-50 border-slate-200'}`}>
+                <div className={`text-5xl mb-4 ${darkMode ? 'text-slate-500' : 'text-slate-400'}`}>{icon}</div>
+                <h3 className={`text-lg font-bold ${darkMode ? 'text-slate-200' : 'text-slate-700'}`}>{message}</h3>
+                <p className={`max-w-md mx-auto ${darkMode ? 'text-slate-400' : 'text-slate-500'}`}>{description}</p>
                 {action && <div className="mt-6">{action}</div>}
             </div>
         );
 
-        const StatCard = ({ icon, label, value, color }) => (
-            <div className="bg-white p-6 rounded-2xl shadow-sm border border-slate-200/80 relative overflow-hidden">
+        const StatCard = ({ icon, label, value, color, darkMode }) => (
+            <div className={`p-6 rounded-2xl shadow-sm border relative overflow-hidden dark-transition ${darkMode ? 'bg-slate-800 border-slate-700' : 'bg-white border-slate-200/80'}`}>
                 <div className={`absolute top-0 left-0 h-1.5 w-full bg-gradient-to-r ${color}`}></div>
                 <div className="flex items-center justify-between mb-4">
                     <div className={`w-12 h-12 rounded-xl flex items-center justify-center text-2xl ${color.replace('from-', 'from-').replace('to-', 'to-')} text-white`}>
                         {icon}
                     </div>
                 </div>
-                <div className="text-3xl font-extrabold text-slate-800 mb-1">{value}</div>
+                <div className={`text-3xl font-extrabold mb-1 ${darkMode ? 'text-white' : 'text-slate-800'}`}>{value}</div>
                 <div className="text-sm font-semibold text-slate-500">{label}</div>
             </div>
         );
@@ -957,7 +1010,7 @@
 
         // --- SECTIONS ---
 
-        const OverviewSection = ({ students, callHistory, user }) => {
+        const OverviewSection = ({ students, callHistory, user, darkMode }) => {
             const todayCalls = useMemo(() => callHistory.filter(c => new Date(c.timestamp).toDateString() === new Date().toDateString()), [callHistory]);
             const totalMinutes = useMemo(() => Math.floor(callHistory.reduce((sum, call) => sum + (call.duration || 0), 0) / 60), [callHistory]);
             const recentStudents = useMemo(() => students.slice(-5).reverse(), [students]);
@@ -966,49 +1019,49 @@
             return (
                 <div className="space-y-6 animate-fade-in">
                     <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
-                        <StatCard icon={<Icons.Students />} label="Total Students" value={students.length} color="from-sky-500 to-cyan-400" />
-                        <StatCard icon={<Icons.CallCenter />} label="Today's Calls" value={todayCalls.length} color="from-green-500 to-emerald-400" />
-                        <StatCard icon={<Icons.Clock />} label="Total Minutes Called" value={totalMinutes} color="from-amber-500 to-orange-400" />
+                        <StatCard icon={<Icons.Students />} label="Total Students" value={students.length} color="from-sky-500 to-cyan-400" darkMode={darkMode} />
+                        <StatCard icon={<Icons.CallCenter />} label="Today's Calls" value={todayCalls.length} color="from-green-500 to-emerald-400" darkMode={darkMode} />
+                        <StatCard icon={<Icons.Clock />} label="Total Minutes Called" value={totalMinutes} color="from-amber-500 to-orange-400" darkMode={darkMode} />
                     </div>
                     <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-                        <div className="bg-white p-6 rounded-2xl shadow-sm border border-slate-200/80">
-                            <h2 className="text-lg font-bold text-slate-800 mb-4">Recently Added Students</h2>
+                        <div className={`p-6 rounded-2xl shadow-sm border dark-transition ${darkMode ? 'bg-slate-800 border-slate-700' : 'bg-white border-slate-200/80'}`}>
+                            <h2 className={`text-lg font-bold mb-4 ${darkMode ? 'text-white' : 'text-slate-800'}`}>Recently Added Students</h2>
                              {recentStudents.length > 0 ? (
                                 <div className="space-y-3">
                                     {recentStudents.map(s => (
-                                        <div key={s.id || s._id} className="bg-slate-50 p-3 rounded-lg flex items-center gap-3">
+                                        <div key={s.id || s._id} className={`p-3 rounded-lg flex items-center gap-3 ${darkMode ? 'bg-slate-700/50' : 'bg-slate-50'}`}>
                                             <StudentAvatar name={s.name} size="md" />
                                             <div>
-                                                <p className="font-semibold text-slate-700">{s.name}</p>
-                                                {user.type === 'admin' && <p className="text-sm text-slate-500">{s.phone}</p>}
+                                                <p className={`font-semibold ${darkMode ? 'text-white' : 'text-slate-700'}`}>{s.name}</p>
+                                                {user.type === 'admin' && <p className={`text-sm ${darkMode ? 'text-slate-400' : 'text-slate-500'}`}>{s.phone}</p>}
                                             </div>
                                         </div>
                                     ))}
                                 </div>
-                            ) : <p className="text-slate-500 text-center py-8">No students yet.</p>}
+                            ) : <p className={`text-center py-8 ${darkMode ? 'text-slate-400' : 'text-slate-500'}`}>No students yet.</p>}
                         </div>
-                        <div className="bg-white p-6 rounded-2xl shadow-sm border border-slate-200/80">
-                            <h2 className="text-lg font-bold text-slate-800 mb-4">Recent Activity</h2>
+                        <div className={`p-6 rounded-2xl shadow-sm border dark-transition ${darkMode ? 'bg-slate-800 border-slate-700' : 'bg-white border-slate-200/80'}`}>
+                            <h2 className={`text-lg font-bold mb-4 ${darkMode ? 'text-white' : 'text-slate-800'}`}>Recent Activity</h2>
                             {recentCalls.length > 0 ? (
                                 <div className="space-y-3">
                                      {recentCalls.map(c => (
-                                        <div key={c.id} className={`p-4 rounded-lg ${c.status.includes('Completed') ? 'bg-green-50' : 'bg-red-50'}`}>
+                                        <div key={c.id} className={`p-4 rounded-lg ${c.status.includes('Completed') ? (darkMode ? 'bg-green-900/30' : 'bg-green-50') : (darkMode ? 'bg-red-900/30' : 'bg-red-50')}`}>
                                             <div className="flex justify-between items-center">
-                                                <p className="font-semibold text-slate-700">{c.studentName}</p>
-                                                <p className="text-sm font-medium text-slate-600">{formatDuration(c.duration)}</p>
+                                                <p className={`font-semibold ${darkMode ? 'text-white' : 'text-slate-700'}`}>{c.studentName}</p>
+                                                <p className={`text-sm font-medium ${darkMode ? 'text-slate-300' : 'text-slate-600'}`}>{formatDuration(c.duration)}</p>
                                             </div>
-                                            <p className="text-xs text-slate-500">by {c.teacherName} on {new Date(c.timestamp).toLocaleDateString()}</p>
+                                            <p className={`text-xs ${darkMode ? 'text-slate-400' : 'text-slate-500'}`}>by {c.teacherName} on {new Date(c.timestamp).toLocaleDateString()}</p>
                                         </div>
                                     ))}
                                 </div>
-                            ) : <p className="text-slate-500 text-center py-8">No activity yet.</p>}
+                            ) : <p className={`text-center py-8 ${darkMode ? 'text-slate-400' : 'text-slate-500'}`}>No activity yet.</p>}
                         </div>
                     </div>
                 </div>
             );
         };
 
-        const HistorySection = ({ user, callHistory }) => {
+        const HistorySection = ({ user, callHistory, darkMode }) => {
             const [searchTerm, setSearchTerm] = useState('');
             const [nowPlaying, setNowPlaying] = useState(null);
             const [currentPage, setCurrentPage] = useState(1);
@@ -1047,18 +1100,18 @@
 
 
             const getStatusInfo = (status) => {
-                if (status.includes('Completed') || status.includes('Ended')) return { color: 'bg-green-100 text-green-800', icon: <Icons.CheckCircle className="w-4 h-4"/> };
-                if (status.includes('Canceled')) return { color: 'bg-amber-100 text-amber-800', icon: <Icons.ExclamationCircle className="w-4 h-4" /> };
-                if (status.includes('Transferred')) return { color: 'bg-blue-100 text-blue-800', icon: <Icons.ArrowRightOnRectangle className="w-4 h-4"/> };
-                return { color: 'bg-red-100 text-red-800', icon: <Icons.XCircle className="w-4 h-4" /> };
+                if (status.includes('Completed') || status.includes('Ended')) return { color: darkMode ? 'bg-green-900/50 text-green-300' : 'bg-green-100 text-green-800', icon: <Icons.CheckCircle className="w-4 h-4"/> };
+                if (status.includes('Canceled')) return { color: darkMode ? 'bg-amber-900/50 text-amber-300' : 'bg-amber-100 text-amber-800', icon: <Icons.ExclamationCircle className="w-4 h-4" /> };
+                if (status.includes('Transferred')) return { color: darkMode ? 'bg-blue-900/50 text-blue-300' : 'bg-blue-100 text-blue-800', icon: <Icons.ArrowRightOnRectangle className="w-4 h-4"/> };
+                return { color: darkMode ? 'bg-red-900/50 text-red-300' : 'bg-red-100 text-red-800', icon: <Icons.XCircle className="w-4 h-4" /> };
             };
 
             return (
-                <div className="bg-white p-6 rounded-2xl shadow-sm border border-slate-200/80">
-                    <h2 className="text-lg font-bold text-slate-800 mb-4">Call Log ({filteredHistory.length} records)</h2>
+                <div className={`p-6 rounded-2xl shadow-sm border dark-transition ${darkMode ? 'bg-slate-800 border-slate-700' : 'bg-white border-slate-200/80'}`}>
+                    <h2 className={`text-lg font-bold mb-4 ${darkMode ? 'text-white' : 'text-slate-800'}`}>Call Log ({filteredHistory.length} records)</h2>
                     <div className="relative mb-4">
-                        <input type="text" placeholder="Search by student or teacher name..." value={searchTerm} onChange={e => setSearchTerm(e.target.value)} className="w-full p-3 pl-10 border border-slate-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 outline-none" />
-                        <Icons.Search className="absolute left-3 top-1/2 -translate-y-1/2 w-5 h-5 text-slate-400" />
+                        <input type="text" placeholder="Search by student or teacher name..." value={searchTerm} onChange={e => setSearchTerm(e.target.value)} className={`w-full p-3 pl-10 border rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 outline-none dark-transition ${darkMode ? 'bg-slate-700 border-slate-600 text-white placeholder-slate-400' : 'bg-white border-slate-300 text-slate-800'}`} />
+                        <Icons.Search className={`absolute left-3 top-1/2 -translate-y-1/2 w-5 h-5 ${darkMode ? 'text-slate-400' : 'text-slate-400'}`} />
                     </div>
 
                     {paginatedHistory.length > 0 ? (
@@ -1067,27 +1120,27 @@
                                 {paginatedHistory.map((call, index) => {
                                     const { color, icon } = getStatusInfo(call.status);
                                     return (
-                                        <div key={call.id} className="bg-slate-50 p-4 rounded-lg border border-slate-200 flex flex-wrap items-center justify-between gap-x-6 gap-y-4 animate-fade-in" style={{ animationDelay: `${index * 30}ms` }}>
+                                        <div key={call.id} className={`p-4 rounded-lg border flex flex-wrap items-center justify-between gap-x-6 gap-y-4 animate-fade-in dark-transition ${darkMode ? 'bg-slate-700/50 border-slate-600' : 'bg-slate-50 border-slate-200'}`} style={{ animationDelay: `${index * 30}ms` }}>
                                             <div className="flex items-center gap-4 flex-1 min-w-[200px]">
                                                 <StudentAvatar name={call.studentName} size="md" />
                                                 <div>
-                                                    <p className="font-bold text-slate-800 text-lg">{call.studentName}</p>
-                                                    <div className="flex items-center gap-2 text-slate-500 text-sm">
+                                                    <p className={`font-bold text-lg ${darkMode ? 'text-white' : 'text-slate-800'}`}>{call.studentName}</p>
+                                                    <div className={`flex items-center gap-2 text-sm ${darkMode ? 'text-slate-400' : 'text-slate-500'}`}>
                                                         <Icons.User className="w-4 h-4"/>
                                                         <span>{call.teacherName}</span>
                                                     </div>
                                                 </div>
                                             </div>
 
-                                            <div className="flex items-center gap-6 text-sm text-slate-600 flex-wrap">
+                                            <div className={`flex items-center gap-6 text-sm flex-wrap ${darkMode ? 'text-slate-300' : 'text-slate-600'}`}>
                                                 <div className="flex items-center gap-2" title="Duration">
-                                                    <Icons.Clock className="w-4 h-4 text-slate-400" />
+                                                    <Icons.Clock className={`w-4 h-4 ${darkMode ? 'text-slate-500' : 'text-slate-400'}`} />
                                                     <span className="font-medium">{formatDuration(call.duration)}</span>
                                                 </div>
                                                 <div className="flex items-center gap-2" title="Date & Time">
-                                                    <Icons.Calendar className="w-4 h-4 text-slate-400"/>
+                                                    <Icons.Calendar className={`w-4 h-4 ${darkMode ? 'text-slate-500' : 'text-slate-400'}`}/>
                                                     <span className="font-medium">{new Date(call.timestamp).toLocaleDateString()}</span>
-                                                    <span className="text-slate-400">•</span>
+                                                    <span className={darkMode ? 'text-slate-500' : 'text-slate-400'}>•</span>
                                                     <span className="font-medium">{new Date(call.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: true })}</span>
                                                 </div>
                                                 <span className={`px-3 py-1 text-xs font-bold rounded-full flex items-center gap-1.5 ${color}`}>
@@ -1116,9 +1169,9 @@
                             </div>
 
                             {totalPages > 1 && (
-                                <div className="flex justify-between items-center mt-4 pt-4 border-t border-slate-200">
+                                <div className={`flex justify-between items-center mt-4 pt-4 border-t ${darkMode ? 'border-slate-700' : 'border-slate-200'}`}>
                                     <div>
-                                        <span className="text-sm text-slate-600 font-medium">
+                                        <span className={`text-sm font-medium ${darkMode ? 'text-slate-400' : 'text-slate-600'}`}>
                                             Showing <span className="font-bold">{((currentPage - 1) * ITEMS_PER_PAGE) + 1}</span> to <span className="font-bold">{Math.min(currentPage * ITEMS_PER_PAGE, filteredHistory.length)}</span> of <span className="font-bold">{filteredHistory.length}</span> records
                                         </span>
                                     </div>
@@ -1126,14 +1179,14 @@
                                         <button
                                             onClick={handlePrevPage}
                                             disabled={currentPage === 1}
-                                            className="px-4 py-2 bg-white text-slate-700 font-semibold rounded-lg text-sm border border-slate-300 hover:bg-slate-50 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+                                            className={`px-4 py-2 font-semibold rounded-lg text-sm border disabled:opacity-50 disabled:cursor-not-allowed transition-colors ${darkMode ? 'bg-slate-700 text-slate-200 border-slate-600 hover:bg-slate-600' : 'bg-white text-slate-700 border-slate-300 hover:bg-slate-50'}`}
                                         >
                                             Previous
                                         </button>
                                         <button
                                             onClick={handleNextPage}
                                             disabled={currentPage === totalPages}
-                                            className="px-4 py-2 bg-white text-slate-700 font-semibold rounded-lg text-sm border border-slate-300 hover:bg-slate-50 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+                                            className={`px-4 py-2 font-semibold rounded-lg text-sm border disabled:opacity-50 disabled:cursor-not-allowed transition-colors ${darkMode ? 'bg-slate-700 text-slate-200 border-slate-600 hover:bg-slate-600' : 'bg-white text-slate-700 border-slate-300 hover:bg-slate-50'}`}
                                         >
                                             Next
                                         </button>
@@ -1142,7 +1195,7 @@
                             )}
                         </>
                     ) : (
-                        <EmptyState icon={<Icons.DocumentText />} message="No Call History Found" description={searchTerm ? "Your search returned no results." : "No calls have been logged yet."} />
+                        <EmptyState icon={<Icons.DocumentText />} message="No Call History Found" description={searchTerm ? "Your search returned no results." : "No calls have been logged yet."} darkMode={darkMode} />
                     )}
                      <AudioPlayerModal 
                         isOpen={!!nowPlaying}
@@ -1150,6 +1203,7 @@
                         url={nowPlaying?.url || null}
                         studentName={nowPlaying?.studentName || null}
                         callSid={nowPlaying?.callSid || null}
+                        darkMode={darkMode}
                     />
                 </div>
             );
@@ -1418,6 +1472,25 @@
         const App = () => {
             // User stored locally for session, but validated against server
             const [currentUser, setCurrentUser] = useLocalStorage('quranAcademyUser', null);
+            
+            // Dark mode state with localStorage persistence
+            const [darkMode, setDarkMode] = useLocalStorage('quranAcademyDarkMode', false);
+            
+            // Toggle dark mode function
+            const toggleDarkMode = useCallback(() => {
+                setDarkMode(prev => !prev);
+            }, [setDarkMode]);
+            
+            // Apply dark mode class to document
+            useEffect(() => {
+                if (darkMode) {
+                    document.documentElement.classList.add('dark');
+                    document.body.style.backgroundColor = '#0f172a';
+                } else {
+                    document.documentElement.classList.remove('dark');
+                    document.body.style.backgroundColor = '#f8fafc';
+                }
+            }, [darkMode]);
             
             // Data loaded from database API
             const [students, setStudents] = useState([]);
@@ -1711,6 +1784,8 @@
                         updateTeacher={updateTeacher}
                         deleteTeacher={deleteTeacher}
                         addCallToHistoryAPI={addCallToHistoryAPI}
+                        darkMode={darkMode}
+                        toggleDarkMode={toggleDarkMode}
                     />
                     <ToastContainer toasts={toasts} dismissToast={dismissToast} />
                     <ConfirmationModal 
@@ -1978,7 +2053,7 @@
 
         // --- Dashboard Component (The main logged-in view) ---
         const Dashboard = (props) => {
-            const { user, onLogout, students, setStudents, callHistory, setCallHistory, teachers, setTeachers, addToast, setConfirmation, setPrompt, dbStatus, addStudent: addStudentAPI, updateStudent: updateStudentAPI, deleteStudent: deleteStudentAPI, addTeacher: addTeacherAPI, updateTeacher: updateTeacherAPI, deleteTeacher: deleteTeacherAPI, addCallToHistoryAPI, conversations, setConversations, smsMessages, setSmsMessages } = props;
+            const { user, onLogout, students, setStudents, callHistory, setCallHistory, teachers, setTeachers, addToast, setConfirmation, setPrompt, dbStatus, addStudent: addStudentAPI, updateStudent: updateStudentAPI, deleteStudent: deleteStudentAPI, addTeacher: addTeacherAPI, updateTeacher: updateTeacherAPI, deleteTeacher: deleteTeacherAPI, addCallToHistoryAPI, conversations, setConversations, smsMessages, setSmsMessages, darkMode, toggleDarkMode } = props;
             const [activeSection, setActiveSection] = useState(user.type === 'admin' ? 'overview' : 'students');
             const [isSidebarOpen, setSidebarOpen] = useState(false);
             
@@ -2572,6 +2647,7 @@
                             updateStudentAPI={updateStudentAPI}
                             deleteStudentAPI={deleteStudentAPI}
                             onInitiateCall={initiateCall} addToast={addToast} setConfirmation={setConfirmation}
+                            darkMode={darkMode}
                         />;
                     case 'calls':
                         return <CallCenterSection
@@ -2581,15 +2657,17 @@
                                 setShowCallModal(false);
                                 setCallState({ status: 'idle', student: null, sid: null, duration: 0, isMuted: false, isHoldActive: false, isMicrophoneReady: false, finishReason: ''});
                             }}
+                            darkMode={darkMode}
                         />;
                     case 'video':
                         return <VideoCallSection 
                             user={user} 
                             students={students}
                             addToast={addToast}
+                            darkMode={darkMode}
                         />;
                     case 'history':
-                        return <HistorySection user={user} callHistory={callHistory} />;
+                        return <HistorySection user={user} callHistory={callHistory} darkMode={darkMode} />;
                     case 'messages':
                         return <MessagesSection 
                             user={user} 
@@ -2599,20 +2677,21 @@
                             messages={smsMessages}
                             setMessages={setSmsMessages}
                             addToast={addToast}
+                            darkMode={darkMode}
                         />;
                     case 'analytics':
-                         return user.type === 'admin' ? <AnalyticsSection callHistory={callHistory} /> : null;
+                         return user.type === 'admin' ? <AnalyticsSection callHistory={callHistory} darkMode={darkMode} /> : null;
                     case 'users':
-                        return user.type === 'admin' ? <UsersSection teachers={teachers} addTeacherAPI={addTeacherAPI} deleteTeacherAPI={deleteTeacherAPI} addToast={addToast} setConfirmation={setConfirmation} setPrompt={setPrompt} /> : null;
+                        return user.type === 'admin' ? <UsersSection teachers={teachers} addTeacherAPI={addTeacherAPI} deleteTeacherAPI={deleteTeacherAPI} addToast={addToast} setConfirmation={setConfirmation} setPrompt={setPrompt} darkMode={darkMode} /> : null;
                     case 'overview':
                     default:
-                         return user.type === 'admin' ? <OverviewSection students={students} callHistory={callHistory} user={user}/> : null;
+                         return user.type === 'admin' ? <OverviewSection students={students} callHistory={callHistory} user={user} darkMode={darkMode} /> : null;
                 }
             };
             
             return (
-                <div className="flex min-h-screen bg-slate-100">
-                    <Sidebar user={user} activeSection={activeSection} setActiveSection={setActiveSection} isOpen={isSidebarOpen} setOpen={setSidebarOpen} />
+                <div className={`flex min-h-screen dark-transition ${darkMode ? 'dark bg-slate-900' : 'bg-slate-100'}`}>
+                    <Sidebar user={user} activeSection={activeSection} setActiveSection={setActiveSection} isOpen={isSidebarOpen} setOpen={setSidebarOpen} darkMode={darkMode} />
                     <main className="flex-1 lg:pl-64 transition-all duration-300">
                         <div className="p-4 sm:p-6 lg:p-8">
                             <TopBar 
@@ -2621,6 +2700,8 @@
                                 user={user} 
                                 onLogout={onLogout} 
                                 onMenuClick={() => setSidebarOpen(o => !o)} 
+                                darkMode={darkMode}
+                                toggleDarkMode={toggleDarkMode}
                             />
                             <div className="mt-6">
                                 {renderSection()}
@@ -2637,6 +2718,7 @@
                             onTransfer={handleTransfer}
                             onVolumeChange={handleVolumeChange}
                             teachers={teachers}
+                            darkMode={darkMode}
                         />
                     )}
                 </div>
@@ -2646,25 +2728,43 @@
 
         // --- Sub-components for Dashboard ---
 
-        const TopBar = ({ title, subtitle, user, onLogout, onMenuClick }) => {
+        const TopBar = ({ title, subtitle, user, onLogout, onMenuClick, darkMode, toggleDarkMode }) => {
             return (
-                <header className="bg-white p-4 rounded-2xl shadow-sm border border-slate-200/80 flex justify-between items-center">
+                <header className={`p-4 rounded-2xl shadow-sm border flex justify-between items-center dark-transition ${darkMode ? 'bg-slate-800 border-slate-700' : 'bg-white border-slate-200/80'}`}>
                     <div className="flex items-center gap-4">
-                         <button onClick={onMenuClick} className="lg:hidden text-slate-500 hover:text-indigo-600">
+                         <button onClick={onMenuClick} className={`lg:hidden transition-colors ${darkMode ? 'text-slate-400 hover:text-indigo-400' : 'text-slate-500 hover:text-indigo-600'}`}>
                             <svg xmlns="http://www.w3.org/2000/svg" className="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 6h16M4 12h16m-7 6h7" /></svg>
                         </button>
                         <div>
-                            <h1 className="text-xl font-bold text-slate-800">{title}</h1>
-                            <p className="text-sm text-slate-500">{subtitle}</p>
+                            <h1 className={`text-xl font-bold ${darkMode ? 'text-white' : 'text-slate-800'}`}>{title}</h1>
+                            <p className={`text-sm ${darkMode ? 'text-slate-400' : 'text-slate-500'}`}>{subtitle}</p>
                         </div>
                     </div>
                     <div className="flex items-center gap-4">
+                        {/* Dark Mode Toggle */}
+                        <button 
+                            onClick={toggleDarkMode}
+                            className={`theme-toggle ${darkMode ? 'theme-toggle-dark' : 'theme-toggle-light'}`}
+                            title={darkMode ? 'Switch to Light Mode' : 'Switch to Dark Mode'}
+                        >
+                            <div className={`theme-toggle-knob ${darkMode ? 'theme-toggle-knob-dark' : 'theme-toggle-knob-light'}`}>
+                                {darkMode ? (
+                                    <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4 text-blue-600" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M20.354 15.354A9 9 0 018.646 3.646 9.003 9.003 0 0012 21a9.003 9.003 0 008.354-5.646z" />
+                                    </svg>
+                                ) : (
+                                    <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4 text-amber-500" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 3v1m0 16v1m9-9h-1M4 12H3m15.364 6.364l-.707-.707M6.343 6.343l-.707-.707m12.728 0l-.707.707M6.343 17.657l-.707.707M16 12a4 4 0 11-8 0 4 4 0 018 0z" />
+                                    </svg>
+                                )}
+                            </div>
+                        </button>
                         <div className="text-right hidden sm:block">
-                            <p className="font-semibold text-slate-700">{user.name}</p>
-                            <p className="text-xs text-slate-500 capitalize">{user.type} Account</p>
+                            <p className={`font-semibold ${darkMode ? 'text-white' : 'text-slate-700'}`}>{user.name}</p>
+                            <p className={`text-xs capitalize ${darkMode ? 'text-slate-400' : 'text-slate-500'}`}>{user.type} Account</p>
                         </div>
                         <StudentAvatar name={user.name} />
-                        <button onClick={onLogout} title="Logout" className="text-slate-500 hover:text-red-500 transition-colors">
+                        <button onClick={onLogout} title="Logout" className={`transition-colors ${darkMode ? 'text-slate-400 hover:text-red-400' : 'text-slate-500 hover:text-red-500'}`}>
                              <svg xmlns="http://www.w3.org/2000/svg" className="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}><path strokeLinecap="round" strokeLinejoin="round" d="M17 16l4-4m0 0l-4-4m4 4H7m6 4v1a3 3 0 01-3 3H6a3 3 0 01-3-3V7a3 3 0 013-3h4a3 3 0 013 3v1" /></svg>
                         </button>
                     </div>
@@ -2674,7 +2774,7 @@
 
 
         const Sidebar = 
-        ({ user, activeSection, setActiveSection, isOpen, setOpen }) => {
+        ({ user, activeSection, setActiveSection, isOpen, setOpen, darkMode }) => {
             
             const NavItem = ({ section, icon, label, disabled = false }) => {
                 const isActive = activeSection === section;
@@ -2683,7 +2783,11 @@
                         disabled={disabled}
                         onClick={() => { setActiveSection(section); setOpen(false); }}
                         className={`w-full flex items-center gap-3 px-4 py-3 rounded-lg text-left transition-colors ${
-                            isActive ? 'bg-indigo-500 text-white shadow-lg' : 'text-slate-600 hover:bg-slate-200'
+                            isActive 
+                                ? 'bg-indigo-500 text-white shadow-lg' 
+                                : darkMode 
+                                    ? 'text-slate-300 hover:bg-slate-700' 
+                                    : 'text-slate-600 hover:bg-slate-200'
                         } ${disabled ? 'opacity-50 cursor-not-allowed' : ''}`}
                     >
                         {icon}
@@ -2695,14 +2799,14 @@
             return (
                 <>
                     <div className={`fixed inset-0 bg-black bg-opacity-50 z-30 lg:hidden transition-opacity ${isOpen ? 'opacity-100' : 'opacity-0 pointer-events-none'}`} onClick={() => setOpen(false)}></div>
-                    <aside className={`fixed top-0 left-0 w-64 h-full bg-white border-r border-slate-200 p-4 z-40 transform transition-transform lg:transform-none ${isOpen ? 'translate-x-0' : '-translate-x-full'}`}>
+                    <aside className={`fixed top-0 left-0 w-64 h-full p-4 z-40 transform transition-transform lg:transform-none dark-transition ${isOpen ? 'translate-x-0' : '-translate-x-full'} ${darkMode ? 'bg-slate-800 border-r border-slate-700' : 'bg-white border-r border-slate-200'}`}>
                          <div className="flex items-center gap-3 p-2 mb-6">
                             <div className="bg-gradient-to-r from-indigo-500 to-violet-500 p-3 rounded-xl">
                                 <Icons.BuildingLibrary className="w-6 h-6 text-white"/>
                             </div>
                             <div>
-                                <h1 className="text-lg font-extrabold text-slate-800">Quran Academy</h1>
-                                <p className="text-xs text-slate-500">Calling System</p>
+                                <h1 className={`text-lg font-extrabold ${darkMode ? 'text-white' : 'text-slate-800'}`}>Quran Academy</h1>
+                                <p className={`text-xs ${darkMode ? 'text-slate-400' : 'text-slate-500'}`}>Calling System</p>
                             </div>
                         </div>
                         <nav className="space-y-2">
@@ -2721,7 +2825,7 @@
         };
 
 
-        const StudentsSection = ({ user, students, addStudentAPI, updateStudentAPI, deleteStudentAPI, onInitiateCall, addToast, setConfirmation }) => {
+        const StudentsSection = ({ user, students, addStudentAPI, updateStudentAPI, deleteStudentAPI, onInitiateCall, addToast, setConfirmation, darkMode }) => {
             const [searchTerm, setSearchTerm] = useState('');
             const [isModalOpen, setModalOpen] = useState(false);
             const [studentToEdit, setStudentToEdit] = useState(null);
@@ -2781,10 +2885,10 @@
             };
             
             return (
-                <div className="bg-white p-6 rounded-2xl shadow-sm border border-slate-200/80">
+                <div className={`p-6 rounded-2xl shadow-sm border dark-transition ${darkMode ? 'bg-slate-800 border-slate-700' : 'bg-white border-slate-200/80'}`}>
                     <div className="flex justify-between items-center mb-4 flex-wrap gap-4">
                          <div className="relative flex-1 min-w-[250px]">
-                            <input type="text" placeholder={user.type === 'admin' ? "Search by name or phone..." : "Search by name..."} value={searchTerm} onChange={e => setSearchTerm(e.target.value)} className="w-full p-3 pl-10 border border-slate-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 outline-none" />
+                            <input type="text" placeholder={user.type === 'admin' ? "Search by name or phone..." : "Search by name..."} value={searchTerm} onChange={e => setSearchTerm(e.target.value)} className={`w-full p-3 pl-10 border rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 outline-none dark-transition ${darkMode ? 'bg-slate-700 border-slate-600 text-white placeholder-slate-400' : 'bg-white border-slate-300 text-slate-800'}`} />
                             <Icons.Search className="absolute left-3 top-1/2 -translate-y-1/2 w-5 h-5 text-slate-400" />
                         </div>
                         {user.type === 'admin' && (
@@ -2798,27 +2902,27 @@
                     {filteredStudents.length > 0 ? (
                         <div className="space-y-3 custom-scrollbar overflow-y-auto max-h-[65vh] pr-2">
                             {filteredStudents.map((student, index) => (
-                                <div key={student.id || student._id} className="bg-slate-50 p-4 rounded-lg border border-slate-200 animate-fade-in" style={{ animationDelay: `${index * 30}ms` }}>
+                                <div key={student.id || student._id} className={`p-4 rounded-lg border animate-fade-in dark-transition ${darkMode ? 'bg-slate-700/50 border-slate-600' : 'bg-slate-50 border-slate-200'}`} style={{ animationDelay: `${index * 30}ms` }}>
                                     <div className="grid grid-cols-1 md:grid-cols-4 gap-4 items-center">
                                         <div className="flex items-center gap-4">
                                             <StudentAvatar name={student.name} />
                                             <div>
-                                                <p className="font-bold text-slate-800">{student.name}</p>
-                                                <p className="text-sm text-slate-500">{student.parent}</p>
+                                                <p className={`font-bold ${darkMode ? 'text-white' : 'text-slate-800'}`}>{student.name}</p>
+                                                <p className={`text-sm ${darkMode ? 'text-slate-400' : 'text-slate-500'}`}>{student.parent}</p>
                                             </div>
                                         </div>
-                                        <div className="text-slate-600">{user.type === 'admin' ? student.phone : 'Phone Hidden'}</div>
-                                        <div className="text-slate-600 hidden md:block">{student.email}</div>
+                                        <div className={darkMode ? 'text-slate-300' : 'text-slate-600'}>{user.type === 'admin' ? student.phone : 'Phone Hidden'}</div>
+                                        <div className={`hidden md:block ${darkMode ? 'text-slate-300' : 'text-slate-600'}`}>{student.email}</div>
                                         <div className="flex items-center justify-end gap-2">
-                                             <button onClick={() => onInitiateCall(student)} className="p-2 text-green-600 bg-green-100 rounded-full hover:bg-green-200 transition-colors" title="Call Student">
+                                             <button onClick={() => onInitiateCall(student)} className={`p-2 rounded-full transition-colors ${darkMode ? 'text-green-400 bg-green-900/50 hover:bg-green-800/50' : 'text-green-600 bg-green-100 hover:bg-green-200'}`} title="Call Student">
                                                 <Icons.CallCenter className="w-5 h-5" />
                                             </button>
                                             {user.type === 'admin' && (
                                                 <>
-                                                    <button onClick={() => { setStudentToEdit(student); setModalOpen(true); }} className="p-2 text-blue-600 bg-blue-100 rounded-full hover:bg-blue-200 transition-colors" title="Edit Student">
+                                                    <button onClick={() => { setStudentToEdit(student); setModalOpen(true); }} className={`p-2 rounded-full transition-colors ${darkMode ? 'text-blue-400 bg-blue-900/50 hover:bg-blue-800/50' : 'text-blue-600 bg-blue-100 hover:bg-blue-200'}`} title="Edit Student">
                                                         <Icons.Edit className="w-5 h-5" />
                                                     </button>
-                                                    <button onClick={() => handleDelete(student)} className="p-2 text-red-600 bg-red-100 rounded-full hover:bg-red-200 transition-colors" title="Delete Student">
+                                                    <button onClick={() => handleDelete(student)} className={`p-2 rounded-full transition-colors ${darkMode ? 'text-red-400 bg-red-900/50 hover:bg-red-800/50' : 'text-red-600 bg-red-100 hover:bg-red-200'}`} title="Delete Student">
                                                         <Icons.Trash className="w-5 h-5" />
                                                     </button>
                                                 </>
@@ -2829,7 +2933,7 @@
                             ))}
                         </div>
                     ) : (
-                         <EmptyState icon={<Icons.Students />} message="No Students Found" description={searchTerm ? "Your search returned no results." : "No students have been added yet."} action={
+                         <EmptyState icon={<Icons.Students />} message="No Students Found" description={searchTerm ? "Your search returned no results." : "No students have been added yet."} darkMode={darkMode} action={
                              user.type === 'admin' ? <button onClick={() => { setStudentToEdit(null); setModalOpen(true); }} className="px-4 py-2 bg-indigo-500 text-white font-semibold rounded-lg">Add First Student</button> : undefined
                          }/>
                     )}
@@ -2840,12 +2944,13 @@
                         onSave={handleSaveStudent}
                         studentToEdit={studentToEdit}
                         addToast={addToast}
+                        darkMode={darkMode}
                     />
                 </div>
             );
         };
 
-        const CallCenterSection = ({ user, students, onInitiateCall, callState, onResetCall }) => {
+        const CallCenterSection = ({ user, students, onInitiateCall, callState, onResetCall, darkMode }) => {
             const [selectedStudentId, setSelectedStudentId] = useState(null);
             // Match by either id or _id, and handle both string and number types
             const student = useMemo(() => students.find(s => 
@@ -2854,7 +2959,7 @@
             ), [students, selectedStudentId]);
 
             const RealTimeNotice = () => (
-                <div className="bg-green-100 border-l-4 border-green-500 text-green-800 p-4 rounded-lg mb-6 flex items-start gap-3 text-sm">
+                <div className={`border-l-4 p-4 rounded-lg mb-6 flex items-start gap-3 text-sm ${darkMode ? 'bg-green-900/30 border-green-500 text-green-300' : 'bg-green-100 border-green-500 text-green-800'}`}>
                     <Icons.Info className="w-5 h-5 mt-0.5 flex-shrink-0" />
                     <div>
                         <p className="font-bold">Live Calling Mode Active</p>
@@ -2866,30 +2971,30 @@
             const CallSummaryIcon = ({ reason }) => {
                 const reasonLower = (reason || '').toLowerCase();
                 if (reasonLower.includes('ended') || reasonLower.includes('completed')) {
-                    return <div className="w-16 h-16 bg-green-100 rounded-full flex items-center justify-center mx-auto mb-4 text-green-500"><Icons.CheckCircle className="w-10 h-10"/></div>;
+                    return <div className={`w-16 h-16 rounded-full flex items-center justify-center mx-auto mb-4 ${darkMode ? 'bg-green-900/50 text-green-400' : 'bg-green-100 text-green-500'}`}><Icons.CheckCircle className="w-10 h-10"/></div>;
                 }
                 if (reasonLower.includes('busy')) {
-                    return <div className="w-16 h-16 bg-red-100 rounded-full flex items-center justify-center mx-auto mb-4 text-red-500"><Icons.Phone className="w-10 h-10"/></div>;
+                    return <div className={`w-16 h-16 rounded-full flex items-center justify-center mx-auto mb-4 ${darkMode ? 'bg-red-900/50 text-red-400' : 'bg-red-100 text-red-500'}`}><Icons.Phone className="w-10 h-10"/></div>;
                 }
                 if (reasonLower.includes('answer')) {
-                    return <div className="w-16 h-16 bg-amber-100 rounded-full flex items-center justify-center mx-auto mb-4 text-amber-500"><Icons.Clock className="w-10 h-10"/></div>;
+                    return <div className={`w-16 h-16 rounded-full flex items-center justify-center mx-auto mb-4 ${darkMode ? 'bg-amber-900/50 text-amber-400' : 'bg-amber-100 text-amber-500'}`}><Icons.Clock className="w-10 h-10"/></div>;
                 }
                 if (reasonLower.includes('transferred')) {
-                    return <div className="w-16 h-16 bg-sky-100 rounded-full flex items-center justify-center mx-auto mb-4 text-sky-500"><Icons.ArrowRightOnRectangle className="w-10 h-10"/></div>;
+                    return <div className={`w-16 h-16 rounded-full flex items-center justify-center mx-auto mb-4 ${darkMode ? 'bg-sky-900/50 text-sky-400' : 'bg-sky-100 text-sky-500'}`}><Icons.ArrowRightOnRectangle className="w-10 h-10"/></div>;
                 }
                 // Default/Error
-                return <div className="w-16 h-16 bg-red-100 rounded-full flex items-center justify-center mx-auto mb-4 text-red-500"><Icons.ExclamationCircle className="w-10 h-10"/></div>;
+                return <div className={`w-16 h-16 rounded-full flex items-center justify-center mx-auto mb-4 ${darkMode ? 'bg-red-900/50 text-red-400' : 'bg-red-100 text-red-500'}`}><Icons.ExclamationCircle className="w-10 h-10"/></div>;
             };
 
             const finishedUI = (
-                <div className="bg-white p-8 rounded-2xl shadow-sm border border-slate-200/80 text-center animate-fade-in max-w-lg mx-auto">
+                <div className={`p-8 rounded-2xl shadow-sm border text-center animate-fade-in max-w-lg mx-auto dark-transition ${darkMode ? 'bg-slate-800 border-slate-700' : 'bg-white border-slate-200/80'}`}>
                     <CallSummaryIcon reason={callState.finishReason} />
-                    <h2 className="text-2xl font-bold text-slate-800 mb-2">Call Summary</h2>
-                    <p className="text-slate-600 mb-2">
-                        For call with <span className="font-semibold text-slate-800">{callState.student?.name || 'Unknown Student'}</span>
+                    <h2 className={`text-2xl font-bold mb-2 ${darkMode ? 'text-white' : 'text-slate-800'}`}>Call Summary</h2>
+                    <p className={`mb-2 ${darkMode ? 'text-slate-300' : 'text-slate-600'}`}>
+                        For call with <span className={`font-semibold ${darkMode ? 'text-white' : 'text-slate-800'}`}>{callState.student?.name || 'Unknown Student'}</span>
                     </p>
-                    <p className="text-sm text-slate-500 mb-4 font-medium bg-slate-100 inline-block px-3 py-1 rounded-full">{callState.finishReason}</p>
-                    <div className="text-5xl font-mono font-bold text-slate-700 my-6 bg-slate-50 p-4 rounded-xl inline-block w-full">{formatDuration(callState.duration)}</div>
+                    <p className={`text-sm mb-4 font-medium inline-block px-3 py-1 rounded-full ${darkMode ? 'bg-slate-700 text-slate-300' : 'bg-slate-100 text-slate-500'}`}>{callState.finishReason}</p>
+                    <div className={`text-5xl font-mono font-bold my-6 p-4 rounded-xl inline-block w-full ${darkMode ? 'bg-slate-700 text-white' : 'bg-slate-50 text-slate-700'}`}>{formatDuration(callState.duration)}</div>
                     <button onClick={onResetCall} className="w-full px-6 py-3 bg-gradient-to-r from-indigo-500 to-violet-500 text-white font-bold rounded-lg hover:opacity-90 transition-opacity">
                         Make Another Call
                     </button>
@@ -2902,10 +3007,10 @@
 
             if (callState.status !== 'idle') {
                 return (
-                    <div className="bg-white p-8 rounded-2xl shadow-sm border border-slate-200/80 text-center">
-                        <h2 className="text-2xl font-bold text-slate-800 mb-2">Call in Progress</h2>
-                        <p className="text-slate-600 mb-6">Manage the active call in the floating call window.</p>
-                         <div className="flex items-center justify-center gap-2 text-slate-500 animate-pulse">
+                    <div className={`p-8 rounded-2xl shadow-sm border text-center dark-transition ${darkMode ? 'bg-slate-800 border-slate-700' : 'bg-white border-slate-200/80'}`}>
+                        <h2 className={`text-2xl font-bold mb-2 ${darkMode ? 'text-white' : 'text-slate-800'}`}>Call in Progress</h2>
+                        <p className={`mb-6 ${darkMode ? 'text-slate-300' : 'text-slate-600'}`}>Manage the active call in the floating call window.</p>
+                         <div className={`flex items-center justify-center gap-2 animate-pulse ${darkMode ? 'text-slate-400' : 'text-slate-500'}`}>
                             <Icons.Phone className="w-5 h-5" />
                             <span>{callState.student?.name} - {formatDuration(callState.duration)}</span>
                         </div>
@@ -2916,30 +3021,30 @@
             return (
                 <div>
                     <RealTimeNotice />
-                    <div className="bg-white p-8 rounded-2xl shadow-sm border border-slate-200/80">
-                        <h2 className="text-xl font-bold text-slate-800 mb-4">Select a Student to Call</h2>
+                    <div className={`p-8 rounded-2xl shadow-sm border dark-transition ${darkMode ? 'bg-slate-800 border-slate-700' : 'bg-white border-slate-200/80'}`}>
+                        <h2 className={`text-xl font-bold mb-4 ${darkMode ? 'text-white' : 'text-slate-800'}`}>Select a Student to Call</h2>
                         {students.length > 0 ? (
                             <select 
                                 onChange={e => setSelectedStudentId(e.target.value || null)} 
-                                className="w-full p-3 border border-slate-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 outline-none"
+                                className={`w-full p-3 border rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 outline-none dark-transition ${darkMode ? 'bg-slate-700 border-slate-600 text-white' : 'bg-white border-slate-300 text-slate-800'}`}
                                 value={selectedStudentId || ''}
                             >
                                 <option value="">-- Choose a student --</option>
                                 {students.map(s => <option key={s.id || s._id} value={s.id || s._id}>{s.name}{user.type === 'admin' ? ` - ${s.phone}` : ''}</option>)}
                             </select>
                         ) : (
-                            <p className="text-slate-500">No students available to call. Please add students first.</p>
+                            <p className={darkMode ? 'text-slate-400' : 'text-slate-500'}>No students available to call. Please add students first.</p>
                         )}
                         {student && (
                             <div className="mt-8 text-center">
                                 <StudentAvatar name={student.name} size="lg" />
-                                <h2 className="text-3xl font-bold text-slate-800 mt-4">{student.name}</h2>
-                                <p className="text-slate-500 text-lg">{user.type === 'admin' ? student.phone : 'Phone Hidden'}</p>
-                                <button onClick={() => onInitiateCall(student)} className="mt-8 w-24 h-24 bg-green-500 text-white rounded-full flex flex-col items-center justify-center shadow-lg hover:bg-green-600 transition-transform hover:scale-105 disabled:opacity-50 disabled:cursor-not-allowed">
+                                <h2 className={`text-3xl font-bold mt-4 ${darkMode ? 'text-white' : 'text-slate-800'}`}>{student.name}</h2>
+                                <p className={`text-lg ${darkMode ? 'text-slate-400' : 'text-slate-500'}`}>{user.type === 'admin' ? student.phone : 'Phone Hidden'}</p>
+                                <button onClick={() => onInitiateCall(student)} className="mt-8 w-24 h-24 bg-green-500 text-white rounded-full flex flex-col items-center justify-center shadow-lg hover:bg-green-600 transition-transform hover:scale-105 disabled:opacity-50 disabled:cursor-not-allowed mx-auto">
                                     <Icons.CallCenter className="w-8 h-8"/>
                                     <span className="text-xs font-semibold mt-1">Call</span>
                                 </button>
-                                <button onClick={() => setSelectedStudentId(null)} className="mt-6 block mx-auto text-sm text-slate-500 hover:text-slate-800">
+                                <button onClick={() => setSelectedStudentId(null)} className={`mt-6 block mx-auto text-sm ${darkMode ? 'text-slate-400 hover:text-slate-200' : 'text-slate-500 hover:text-slate-800'}`}>
                                     Change Student
                                 </button>
                             </div>

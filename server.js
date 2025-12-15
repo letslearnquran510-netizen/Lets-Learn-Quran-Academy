@@ -223,6 +223,7 @@ async function initializeAdmin() {
 const activeCalls = new Map();
 const recordingsMap = new Map();
 const activeVideoRooms = new Map(); // For tracking active video rooms
+const inboundCalls = new Map(); // For tracking incoming calls waiting to be answered
 
 // In-memory fallback if MongoDB not connected
 let inMemoryStudents = [];
@@ -310,6 +311,40 @@ function broadcastNewMessage(message) {
     const payload = JSON.stringify({
         type: 'NEW_SMS_MESSAGE',
         message,
+        timestamp: Date.now()
+    });
+    
+    wsClients.forEach(client => {
+        if (client.readyState === WebSocket.OPEN) {
+            client.send(payload);
+        }
+    });
+}
+
+// Broadcast incoming call to all clients
+function broadcastIncomingCall(callData) {
+    const payload = JSON.stringify({
+        type: 'INCOMING_CALL',
+        call: callData,
+        timestamp: Date.now()
+    });
+    
+    console.log('📢 Broadcasting incoming call to', wsClients.size, 'clients');
+    
+    wsClients.forEach(client => {
+        if (client.readyState === WebSocket.OPEN) {
+            client.send(payload);
+        }
+    });
+}
+
+// Broadcast incoming call status update (answered, rejected, ended)
+function broadcastIncomingCallStatus(callSid, status, additionalData = {}) {
+    const payload = JSON.stringify({
+        type: 'INCOMING_CALL_STATUS',
+        callSid,
+        status,
+        ...additionalData,
         timestamp: Date.now()
     });
     
@@ -929,10 +964,10 @@ app.post('/api/video/create-room', async (req, res) => {
         const roomName = generateRoomName();
         const joinUrl = `${config.publicUrl}/video-room.html?room=${roomName}&name=${encodeURIComponent(studentName)}`;
         
-        // Generate teacher token FIRST (fast operation)
+        // Generate teacher token
         const teacherToken = generateVideoToken(teacherName || 'Teacher', roomName);
         
-        // Room data
+        // Save room to database
         const roomData = {
             roomName,
             studentId: studentId || studentPhone,
@@ -945,7 +980,21 @@ app.post('/api/video/create-room', async (req, res) => {
             startedAt: new Date()
         };
         
-        // ⚡ IMMEDIATELY track active room in memory (no waiting)
+        let savedRoom;
+        if (isDbConnected()) {
+            try {
+                savedRoom = await VideoRoom.create(roomData);
+                console.log('✅ Room saved to database:', roomName);
+            } catch (dbErr) {
+                console.error('⚠️ Failed to save room to database:', dbErr.message);
+                savedRoom = { ...roomData, _id: Date.now().toString() };
+            }
+        } else {
+            savedRoom = { ...roomData, _id: Date.now().toString() };
+            console.log('⚠️ Room NOT saved to database (no connection)');
+        }
+        
+        // Track active room - teacher is joining immediately
         activeVideoRooms.set(roomName, {
             ...roomData,
             teacherJoined: true,
@@ -955,35 +1004,24 @@ app.post('/api/video/create-room', async (req, res) => {
         console.log('✅ Room added to active rooms:', roomName);
         console.log('   Total active rooms:', activeVideoRooms.size);
         
-        // ⚡ SEND SMS IMMEDIATELY - Don't wait for database!
-        // Fire SMS in background - don't await
+        // Send SMS invitation to student
         if (twilioClient) {
-            const smsBody = `Assalam Alaikum ${studentName}! Your teacher is waiting for you in a video class. Join now: ${joinUrl}`;
-            
-            twilioClient.messages.create({
-                body: smsBody,
-                from: config.twilio.phoneNumber,
-                to: studentPhone
-            }).then(() => {
+            try {
+                const smsBody = `Assalam Alaikum ${studentName}! Your teacher is waiting for you in a video class. Join now: ${joinUrl}`;
+                
+                await twilioClient.messages.create({
+                    body: smsBody,
+                    from: config.twilio.phoneNumber,
+                    to: studentPhone
+                });
+                
                 console.log('✅ SMS invitation sent to student');
-            }).catch((smsErr) => {
+            } catch (smsErr) {
                 console.error('⚠️ Failed to send SMS invitation:', smsErr.message);
-            });
-            
-            console.log('📤 SMS sending initiated (not waiting)');
+                // Continue even if SMS fails - teacher can share link manually
+            }
         }
         
-        // Save to database in background - don't await
-        if (isDbConnected()) {
-            VideoRoom.create(roomData).then(() => {
-                console.log('✅ Room saved to database:', roomName);
-            }).catch((dbErr) => {
-                console.error('⚠️ Failed to save room to database:', dbErr.message);
-            });
-        }
-        
-        // ⚡ RESPOND IMMEDIATELY to frontend
-        // Teacher can start connecting while SMS is being sent
         console.log('✅ Video room created:', roomName);
         console.log('   Join URL:', joinUrl);
         
@@ -1001,9 +1039,7 @@ app.post('/api/video/create-room', async (req, res) => {
         
     } catch (err) {
         console.error('❌ Create video room error:', err);
-        if (!res.headersSent) {
-            res.status(500).json({ success: false, error: err.message || 'Failed to create video room' });
-        }
+        res.status(500).json({ success: false, error: err.message || 'Failed to create video room' });
     }
 });
 
@@ -1662,6 +1698,305 @@ app.post('/webhooks/call-status', (req, res) => {
     broadcastCallStatus(CallSid, CallStatus, duration, cachedCall?.recordingUrl || RecordingUrl || null);
     
     res.status(200).send('OK');
+});
+
+// ---------------------------------------------------------
+// INCOMING VOICE CALL WEBHOOK
+// ---------------------------------------------------------
+
+// Webhook for incoming voice calls - Twilio calls this when someone calls your number
+app.post('/webhooks/voice-incoming', async (req, res) => {
+    const { CallSid, From, To, CallStatus, Direction } = req.body;
+    
+    console.log('\n' + '='.repeat(60));
+    console.log('📞 INCOMING CALL RECEIVED');
+    console.log('   CallSid:', CallSid);
+    console.log('   From:', From);
+    console.log('   To:', To);
+    console.log('   Status:', CallStatus);
+    console.log('   Direction:', Direction);
+    console.log('='.repeat(60));
+    
+    try {
+        // Look up caller in students database
+        let callerName = 'Unknown Caller';
+        let callerStudent = null;
+        
+        if (isDbConnected()) {
+            callerStudent = await Student.findOne({ phone: From });
+        } else {
+            callerStudent = inMemoryStudents.find(s => s.phone === From);
+        }
+        
+        if (callerStudent) {
+            callerName = callerStudent.name;
+            console.log('   ✅ Caller identified:', callerName);
+        } else {
+            console.log('   ⚠️ Caller not in student database');
+        }
+        
+        // Store incoming call data
+        const incomingCallData = {
+            callSid: CallSid,
+            from: From,
+            to: To,
+            callerName: callerName,
+            studentId: callerStudent?.id || callerStudent?._id || null,
+            status: 'ringing',
+            startTime: Date.now(),
+            answeredBy: null,
+            answeredTime: null
+        };
+        
+        inboundCalls.set(CallSid, incomingCallData);
+        
+        // Broadcast incoming call to all connected clients
+        broadcastIncomingCall(incomingCallData);
+        
+        // Generate TwiML response - Play music/message while waiting for answer
+        // The call will be kept alive for 60 seconds waiting for someone to answer
+        const twiml = `<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+    <Say voice="alice">Incoming call from ${callerName.replace(/[<>&'"]/g, '')}. Please wait while we connect you.</Say>
+    <Play loop="0">http://com.twilio.sounds.music.s3.amazonaws.com/MARKOVICHAMP-B4.mp3</Play>
+</Response>`;
+        
+        console.log('   📤 Sending TwiML response (hold music)');
+        
+        res.type('text/xml');
+        res.send(twiml);
+        
+        // Set a timeout to auto-reject if not answered within 45 seconds
+        setTimeout(() => {
+            const call = inboundCalls.get(CallSid);
+            if (call && call.status === 'ringing') {
+                console.log('⏰ Incoming call timeout - not answered:', CallSid);
+                call.status = 'missed';
+                broadcastIncomingCallStatus(CallSid, 'missed', { callerName, from: From });
+                
+                // Save missed call to history
+                saveInboundCallHistory(call, 'Missed', 0);
+            }
+        }, 45000);
+        
+    } catch (error) {
+        console.error('❌ Error handling incoming call:', error);
+        
+        // Fallback TwiML - just play a message
+        const twiml = `<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+    <Say voice="alice">Thank you for calling Quran Academy. We are currently unavailable. Please try again later.</Say>
+    <Hangup/>
+</Response>`;
+        
+        res.type('text/xml');
+        res.send(twiml);
+    }
+});
+
+// Webhook for incoming call status updates
+app.post('/webhooks/voice-incoming-status', async (req, res) => {
+    const { CallSid, CallStatus, CallDuration } = req.body;
+    
+    console.log('📡 Incoming call status update:', CallStatus, 'for:', CallSid);
+    
+    const incomingCall = inboundCalls.get(CallSid);
+    
+    if (incomingCall) {
+        const duration = parseInt(CallDuration) || 0;
+        
+        if (CallStatus === 'completed' || CallStatus === 'busy' || CallStatus === 'no-answer' || CallStatus === 'canceled' || CallStatus === 'failed') {
+            console.log('   📞 Incoming call ended:', CallStatus);
+            
+            // Determine final status
+            let finalStatus = 'Missed';
+            if (incomingCall.answeredBy) {
+                finalStatus = 'Completed';
+            } else if (CallStatus === 'busy') {
+                finalStatus = 'Busy';
+            } else if (CallStatus === 'no-answer') {
+                finalStatus = 'No Answer';
+            } else if (CallStatus === 'canceled') {
+                finalStatus = 'Canceled';
+            }
+            
+            incomingCall.status = CallStatus;
+            incomingCall.duration = duration;
+            
+            // Save to call history
+            saveInboundCallHistory(incomingCall, finalStatus, duration);
+            
+            // Broadcast status
+            broadcastIncomingCallStatus(CallSid, CallStatus, { 
+                duration, 
+                callerName: incomingCall.callerName,
+                from: incomingCall.from
+            });
+            
+            // Clean up
+            inboundCalls.delete(CallSid);
+        }
+    }
+    
+    res.status(200).send('OK');
+});
+
+// Helper function to save inbound call to history
+async function saveInboundCallHistory(callData, status, duration) {
+    const historyEntry = {
+        id: Date.now(),
+        callSid: callData.callSid,
+        studentId: callData.studentId,
+        studentName: callData.callerName,
+        teacherName: callData.answeredBy || 'System',
+        phone: callData.from,
+        duration: duration,
+        status: `Inbound - ${status}`,
+        timestamp: new Date(callData.startTime).toISOString(),
+        direction: 'inbound',
+        recordingUrl: null
+    };
+    
+    try {
+        if (isDbConnected()) {
+            await CallHistory.create(historyEntry);
+            console.log('   💾 Inbound call saved to database');
+        } else {
+            inMemoryCallHistory.unshift(historyEntry);
+            console.log('   💾 Inbound call saved to memory');
+        }
+    } catch (err) {
+        console.error('   ❌ Failed to save inbound call history:', err.message);
+    }
+}
+
+// API endpoint to answer an incoming call
+app.post('/api/inbound-call/answer', async (req, res) => {
+    const { callSid, answeredBy } = req.body;
+    
+    console.log('📞 Answering incoming call:', callSid, 'by:', answeredBy);
+    
+    const incomingCall = inboundCalls.get(callSid);
+    
+    if (!incomingCall) {
+        return res.status(404).json({ 
+            success: false, 
+            error: 'Incoming call not found or already ended' 
+        });
+    }
+    
+    if (incomingCall.status !== 'ringing') {
+        return res.status(400).json({ 
+            success: false, 
+            error: 'Call is no longer ringing' 
+        });
+    }
+    
+    try {
+        // Update call with TwiML to connect
+        // This redirects the call to a conference or direct connection
+        await twilioClient.calls(callSid).update({
+            twiml: `<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+    <Say voice="alice">Connecting you now.</Say>
+    <Dial record="record-from-answer-dual" recordingStatusCallback="${config.publicUrl}/webhooks/recording-status">
+        <Client>${answeredBy.replace(/[^a-zA-Z0-9]/g, '_')}</Client>
+    </Dial>
+</Response>`
+        });
+        
+        // Update call status
+        incomingCall.status = 'answered';
+        incomingCall.answeredBy = answeredBy;
+        incomingCall.answeredTime = Date.now();
+        
+        // Broadcast that call was answered
+        broadcastIncomingCallStatus(callSid, 'answered', {
+            answeredBy,
+            callerName: incomingCall.callerName,
+            from: incomingCall.from
+        });
+        
+        console.log('   ✅ Call answered successfully');
+        
+        res.json({ 
+            success: true, 
+            message: 'Call answered',
+            call: incomingCall
+        });
+        
+    } catch (error) {
+        console.error('❌ Error answering call:', error);
+        res.status(500).json({ 
+            success: false, 
+            error: error.message 
+        });
+    }
+});
+
+// API endpoint to reject/decline an incoming call
+app.post('/api/inbound-call/reject', async (req, res) => {
+    const { callSid, reason } = req.body;
+    
+    console.log('📞 Rejecting incoming call:', callSid, 'reason:', reason);
+    
+    const incomingCall = inboundCalls.get(callSid);
+    
+    if (!incomingCall) {
+        return res.status(404).json({ 
+            success: false, 
+            error: 'Incoming call not found or already ended' 
+        });
+    }
+    
+    try {
+        // End the call with a message
+        await twilioClient.calls(callSid).update({
+            twiml: `<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+    <Say voice="alice">${reason || 'We are currently unavailable. Please try again later.'}</Say>
+    <Hangup/>
+</Response>`
+        });
+        
+        // Update call status
+        incomingCall.status = 'rejected';
+        
+        // Save to history
+        saveInboundCallHistory(incomingCall, 'Rejected', 0);
+        
+        // Broadcast rejection
+        broadcastIncomingCallStatus(callSid, 'rejected', {
+            callerName: incomingCall.callerName,
+            from: incomingCall.from
+        });
+        
+        // Clean up
+        inboundCalls.delete(callSid);
+        
+        console.log('   ✅ Call rejected');
+        
+        res.json({ 
+            success: true, 
+            message: 'Call rejected' 
+        });
+        
+    } catch (error) {
+        console.error('❌ Error rejecting call:', error);
+        res.status(500).json({ 
+            success: false, 
+            error: error.message 
+        });
+    }
+});
+
+// API endpoint to get current incoming calls
+app.get('/api/inbound-calls', (req, res) => {
+    const calls = Array.from(inboundCalls.values()).filter(c => c.status === 'ringing');
+    res.json({ 
+        success: true, 
+        calls 
+    });
 });
 
 // ---------------------------------------------------------

@@ -3693,6 +3693,9 @@
             const roomRef = useRef(null);
             const timerRef = useRef(null);
             
+            // CRITICAL: Ref to prevent multiple endCall executions
+            const videoCallEndedRef = useRef(false);
+            
             // Find selected student
             const selectedStudent = useMemo(() => {
                 if (!selectedStudentId) return null;
@@ -3736,6 +3739,10 @@
                     addToast('Please select a student first', 'error');
                     return;
                 }
+                
+                // CRITICAL: Reset callEndedRef when starting a new call
+                videoCallEndedRef.current = false;
+                console.log('📹 Starting new video call - videoCallEndedRef reset to false');
                 
                 setIsConnecting(true);
                 
@@ -3850,10 +3857,24 @@
                     room.on('participantConnected', handleParticipantConnected);
                     room.on('participantDisconnected', handleParticipantDisconnected);
                     
-                    // Handle disconnect
-                    room.on('disconnected', () => {
-                        console.log('Disconnected from room');
+                    // Handle room disconnected (your own connection lost)
+                    room.on('disconnected', (room, error) => {
+                        console.log('🔴 Disconnected from room');
+                        if (error) {
+                            console.log('   Disconnect reason:', error.message);
+                        }
                         endCall(false);
+                    });
+                    
+                    // Handle reconnection states
+                    room.on('reconnecting', (error) => {
+                        console.log('🟡 Reconnecting to room...', error?.message);
+                        addToast('Connection interrupted - reconnecting...', 'info');
+                    });
+                    
+                    room.on('reconnected', () => {
+                        console.log('🟢 Reconnected to room');
+                        addToast('Reconnected to video call', 'success');
                     });
                     
                 } catch (err) {
@@ -3897,11 +3918,28 @@
                 participant.on('trackUnsubscribed', handleTrackUnsubscribed);
             };
             
-            // Handle participant disconnected
+            // Handle participant disconnected - END CALL when student leaves
             const handleParticipantDisconnected = (participant) => {
-                console.log('Participant disconnected:', participant.identity);
+                console.log('🔴 Participant disconnected:', participant.identity);
                 setStudentJoined(false);
                 addToast(`${participant.identity} left the video call`, 'info');
+                
+                // Check if there are any remaining participants
+                if (roomRef.current) {
+                    const remainingParticipants = roomRef.current.participants.size;
+                    console.log('   Remaining participants:', remainingParticipants);
+                    
+                    // If no participants left (student left), end the call
+                    if (remainingParticipants === 0) {
+                        console.log('🔴 No participants remaining - ending video call');
+                        addToast('Student ended the call - disconnecting...', 'info');
+                        
+                        // End call after a brief moment
+                        setTimeout(() => {
+                            endCall(true);
+                        }, 1000);
+                    }
+                }
             };
             
             // Handle track subscribed
@@ -4024,6 +4062,14 @@
             
             // End call
             const endCall = async (notifyServer = true) => {
+                // CRITICAL: Prevent multiple endCall executions
+                if (videoCallEndedRef.current) {
+                    console.log('🔒 Video call already ended, ignoring duplicate endCall');
+                    return;
+                }
+                videoCallEndedRef.current = true;
+                console.log('🔴 Ending video call...');
+                
                 if (timerRef.current) {
                     clearInterval(timerRef.current);
                     timerRef.current = null;
@@ -4074,6 +4120,10 @@
                 setIsScreenSharing(false);
                 
                 addToast('Video call ended', 'info');
+                
+                // Reset ended ref for next call
+                videoCallEndedRef.current = false;
+                console.log('✅ Video call cleanup complete');
             };
             
             // Copy join link

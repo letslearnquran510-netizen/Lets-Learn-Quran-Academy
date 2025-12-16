@@ -980,21 +980,7 @@ app.post('/api/video/create-room', async (req, res) => {
             startedAt: new Date()
         };
         
-        let savedRoom;
-        if (isDbConnected()) {
-            try {
-                savedRoom = await VideoRoom.create(roomData);
-                console.log('✅ Room saved to database:', roomName);
-            } catch (dbErr) {
-                console.error('⚠️ Failed to save room to database:', dbErr.message);
-                savedRoom = { ...roomData, _id: Date.now().toString() };
-            }
-        } else {
-            savedRoom = { ...roomData, _id: Date.now().toString() };
-            console.log('⚠️ Room NOT saved to database (no connection)');
-        }
-        
-        // Track active room - teacher is joining immediately
+        // Track active room IMMEDIATELY - teacher is joining
         activeVideoRooms.set(roomName, {
             ...roomData,
             teacherJoined: true,
@@ -1003,28 +989,10 @@ app.post('/api/video/create-room', async (req, res) => {
         
         console.log('✅ Room added to active rooms:', roomName);
         console.log('   Total active rooms:', activeVideoRooms.size);
-        
-        // Send SMS invitation to student
-        if (twilioClient) {
-            try {
-                const smsBody = `Assalam Alaikum ${studentName}! Your teacher is waiting for you in a video class. Join now: ${joinUrl}`;
-                
-                await twilioClient.messages.create({
-                    body: smsBody,
-                    from: config.twilio.phoneNumber,
-                    to: studentPhone
-                });
-                
-                console.log('✅ SMS invitation sent to student');
-            } catch (smsErr) {
-                console.error('⚠️ Failed to send SMS invitation:', smsErr.message);
-                // Continue even if SMS fails - teacher can share link manually
-            }
-        }
-        
         console.log('✅ Video room created:', roomName);
         console.log('   Join URL:', joinUrl);
         
+        // SEND RESPONSE IMMEDIATELY - Don't wait for DB or SMS
         res.json({
             success: true,
             room: {
@@ -1037,9 +1005,36 @@ app.post('/api/video/create-room', async (req, res) => {
             }
         });
         
+        // ==========================================
+        // BACKGROUND TASKS (after response sent)
+        // ==========================================
+        
+        // Save to database in background (non-blocking)
+        if (isDbConnected()) {
+            VideoRoom.create(roomData)
+                .then(() => console.log('✅ Room saved to database:', roomName))
+                .catch(dbErr => console.error('⚠️ Failed to save room to database:', dbErr.message));
+        }
+        
+        // Send SMS invitation in background (non-blocking)
+        if (twilioClient) {
+            const smsBody = `Assalam Alaikum ${studentName}! Your teacher is waiting for you in a video class. Join now: ${joinUrl}`;
+            
+            twilioClient.messages.create({
+                body: smsBody,
+                from: config.twilio.phoneNumber,
+                to: studentPhone
+            })
+            .then(() => console.log('✅ SMS invitation sent to student'))
+            .catch(smsErr => console.error('⚠️ Failed to send SMS invitation:', smsErr.message));
+        }
+        
     } catch (err) {
         console.error('❌ Create video room error:', err);
-        res.status(500).json({ success: false, error: err.message || 'Failed to create video room' });
+        // Only send error if response not already sent
+        if (!res.headersSent) {
+            res.status(500).json({ success: false, error: err.message || 'Failed to create video room' });
+        }
     }
 });
 
@@ -1138,19 +1133,12 @@ app.get('/api/video/join/:roomName', async (req, res) => {
             roomInfo.status = 'active';
         }
         
-        // Update database
-        if (isDbConnected()) {
-            await VideoRoom.findOneAndUpdate(
-                { roomName },
-                { status: roomInfo?.teacherJoined ? 'active' : 'waiting' }
-            );
-        }
-        
         // Broadcast student joined
         broadcastVideoEvent(roomName, 'STUDENT_JOINED', { name });
         
         console.log('✅ Student token generated for room:', roomName);
         
+        // SEND RESPONSE IMMEDIATELY
         res.json({
             success: true,
             token,
@@ -1158,9 +1146,19 @@ app.get('/api/video/join/:roomName', async (req, res) => {
             identity: name
         });
         
+        // Update database in background (non-blocking)
+        if (isDbConnected()) {
+            VideoRoom.findOneAndUpdate(
+                { roomName },
+                { status: roomInfo?.teacherJoined ? 'active' : 'waiting' }
+            ).catch(err => console.error('Background DB update error:', err.message));
+        }
+        
     } catch (err) {
         console.error('❌ Join video room error:', err);
-        res.status(500).json({ success: false, error: 'Failed to join video room' });
+        if (!res.headersSent) {
+            res.status(500).json({ success: false, error: 'Failed to join video room' });
+        }
     }
 });
 

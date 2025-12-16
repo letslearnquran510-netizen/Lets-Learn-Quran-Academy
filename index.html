@@ -3679,6 +3679,12 @@
             const [isScreenSharing, setIsScreenSharing] = useState(false);
             const screenTrackRef = useRef(null);
             
+            // Draggable PiP (Picture-in-Picture) state
+            const [pipPosition, setPipPosition] = useState({ x: null, y: null }); // null means use default position
+            const [isDragging, setIsDragging] = useState(false);
+            const dragStartRef = useRef({ x: 0, y: 0, pipX: 0, pipY: 0 });
+            const pipContainerRef = useRef(null);
+            
             const toggleVideoNoiseCancel = () => {
                 const newState = noiseCancellation.toggle();
                 setIsVideoNCEnabled(newState);
@@ -3942,11 +3948,37 @@
                 }
             };
             
-            // Handle track subscribed
+            // Handle track subscribed - PROPERLY STYLE VIDEO ELEMENTS
             const handleTrackSubscribed = (track) => {
                 const remoteContainer = remoteVideoRef.current;
-                if (remoteContainer && (track.kind === 'video' || track.kind === 'audio')) {
+                if (!remoteContainer) return;
+                
+                if (track.kind === 'video') {
+                    // Create and style the video element
+                    const videoElement = track.attach();
+                    videoElement.style.width = '100%';
+                    videoElement.style.height = '100%';
+                    videoElement.style.objectFit = 'contain';
+                    videoElement.style.position = 'absolute';
+                    videoElement.style.top = '0';
+                    videoElement.style.left = '0';
+                    videoElement.style.zIndex = '5';
+                    
+                    // Check if this is a screen share track
+                    if (track.name && track.name.includes('screen')) {
+                        videoElement.style.objectFit = 'contain'; // Screen share should contain, not cover
+                        console.log('📺 Screen share track received from student');
+                    } else {
+                        console.log('📹 Camera video track received from student');
+                    }
+                    
+                    remoteContainer.appendChild(videoElement);
+                    console.log('✅ Remote video attached and styled');
+                    
+                } else if (track.kind === 'audio') {
+                    // Just attach audio without special styling
                     remoteContainer.appendChild(track.attach());
+                    console.log('🔊 Remote audio attached');
                 }
             };
             
@@ -4134,6 +4166,112 @@
                 }
             };
             
+            // ============================================
+            // DRAGGABLE PiP (Picture-in-Picture) HANDLERS
+            // ============================================
+            
+            const handlePipMouseDown = (e) => {
+                e.preventDefault();
+                setIsDragging(true);
+                
+                const pip = pipContainerRef.current;
+                if (!pip) return;
+                
+                const rect = pip.getBoundingClientRect();
+                dragStartRef.current = {
+                    x: e.clientX,
+                    y: e.clientY,
+                    pipX: rect.left,
+                    pipY: rect.top
+                };
+                
+                document.addEventListener('mousemove', handlePipMouseMove);
+                document.addEventListener('mouseup', handlePipMouseUp);
+            };
+            
+            const handlePipMouseMove = (e) => {
+                if (!isDragging && !dragStartRef.current.x) return;
+                
+                const parent = pipContainerRef.current?.parentElement;
+                if (!parent) return;
+                
+                const parentRect = parent.getBoundingClientRect();
+                const pipWidth = 160; // w-40 = 10rem = 160px
+                const pipHeight = 208; // h-52 = 13rem = 208px
+                
+                let newX = dragStartRef.current.pipX + (e.clientX - dragStartRef.current.x);
+                let newY = dragStartRef.current.pipY + (e.clientY - dragStartRef.current.y);
+                
+                // Constrain within parent bounds
+                newX = Math.max(parentRect.left + 8, Math.min(newX, parentRect.right - pipWidth - 8));
+                newY = Math.max(parentRect.top + 8, Math.min(newY, parentRect.bottom - pipHeight - 100)); // 100 for controls
+                
+                // Convert to position relative to parent
+                setPipPosition({
+                    x: newX - parentRect.left,
+                    y: newY - parentRect.top
+                });
+            };
+            
+            const handlePipMouseUp = () => {
+                setIsDragging(false);
+                document.removeEventListener('mousemove', handlePipMouseMove);
+                document.removeEventListener('mouseup', handlePipMouseUp);
+            };
+            
+            // Touch handlers for mobile
+            const handlePipTouchStart = (e) => {
+                const touch = e.touches[0];
+                setIsDragging(true);
+                
+                const pip = pipContainerRef.current;
+                if (!pip) return;
+                
+                const rect = pip.getBoundingClientRect();
+                dragStartRef.current = {
+                    x: touch.clientX,
+                    y: touch.clientY,
+                    pipX: rect.left,
+                    pipY: rect.top
+                };
+            };
+            
+            const handlePipTouchMove = (e) => {
+                if (!isDragging) return;
+                e.preventDefault();
+                
+                const touch = e.touches[0];
+                const parent = pipContainerRef.current?.parentElement;
+                if (!parent) return;
+                
+                const parentRect = parent.getBoundingClientRect();
+                const pipWidth = 160;
+                const pipHeight = 208;
+                
+                let newX = dragStartRef.current.pipX + (touch.clientX - dragStartRef.current.x);
+                let newY = dragStartRef.current.pipY + (touch.clientY - dragStartRef.current.y);
+                
+                // Constrain within parent bounds
+                newX = Math.max(parentRect.left + 8, Math.min(newX, parentRect.right - pipWidth - 8));
+                newY = Math.max(parentRect.top + 8, Math.min(newY, parentRect.bottom - pipHeight - 100));
+                
+                setPipPosition({
+                    x: newX - parentRect.left,
+                    y: newY - parentRect.top
+                });
+            };
+            
+            const handlePipTouchEnd = () => {
+                setIsDragging(false);
+            };
+            
+            // Reset PiP position when call ends
+            useEffect(() => {
+                if (!isInCall) {
+                    setPipPosition({ x: null, y: null });
+                }
+            }, [isInCall]);
+            
             // Render video call in progress
             if (isInCall && currentRoom) {
                 const displayName = currentRoom.studentName || 'Student';
@@ -4191,15 +4329,18 @@
                         </div>
                         
                         {/* Video Area */}
-                        <div className="flex-1 relative bg-slate-950 flex items-center justify-center">
-                            {/* Remote Video */}
+                        <div className="flex-1 relative bg-slate-950 overflow-hidden" ref={pipContainerRef}>
+                            {/* Remote Video - Student's camera or shared screen */}
                             <div 
                                 ref={remoteVideoRef}
-                                className="w-full h-full flex items-center justify-center"
-                                style={{ backgroundColor: '#0f0d1a' }}
+                                className="absolute inset-0 flex items-center justify-center"
+                                style={{ 
+                                    backgroundColor: '#0f0d1a',
+                                }}
                             >
+                                {/* Waiting state - only show when student not joined */}
                                 {!studentJoined && (
-                                    <div className="text-center text-slate-400">
+                                    <div className="text-center text-slate-400 z-10">
                                         <div className="w-16 h-16 border-4 border-indigo-500 border-t-transparent rounded-full animate-spin mx-auto mb-4"></div>
                                         <p className="text-xl mb-2">Waiting for student...</p>
                                         <p className="text-sm">SMS invitation sent to {displayName}</p>
@@ -4210,13 +4351,48 @@
                                 )}
                             </div>
                             
-                            {/* Local Video (Picture-in-Picture) */}
+                            {/* Local Video (Picture-in-Picture) - DRAGGABLE */}
                             <div 
                                 ref={localVideoRef}
-                                className="absolute bottom-24 right-4 w-40 h-52 bg-slate-800 rounded-xl overflow-hidden border-2 border-indigo-500 shadow-xl z-10"
-                                style={{ transform: 'scaleX(-1)' }}
-                            />
+                                className={`absolute w-40 h-52 bg-slate-800 rounded-xl overflow-hidden border-2 shadow-xl z-20 select-none ${
+                                    isDragging ? 'border-green-400 cursor-grabbing scale-105' : 'border-indigo-500 cursor-grab hover:border-indigo-400'
+                                } transition-all duration-150`}
+                                style={{ 
+                                    transform: 'scaleX(-1)',
+                                    // Use custom position if set, otherwise default to bottom-right
+                                    ...(pipPosition.x !== null ? {
+                                        left: `${pipPosition.x}px`,
+                                        top: `${pipPosition.y}px`,
+                                    } : {
+                                        right: '16px',
+                                        bottom: '100px',
+                                    })
+                                }}
+                                onMouseDown={handlePipMouseDown}
+                                onTouchStart={handlePipTouchStart}
+                                onTouchMove={handlePipTouchMove}
+                                onTouchEnd={handlePipTouchEnd}
+                            >
+                                {/* Drag handle indicator */}
+                                <div className="absolute top-1 left-1/2 -translate-x-1/2 z-30 pointer-events-none" style={{ transform: 'scaleX(-1)' }}>
+                                    <div className="flex gap-0.5">
+                                        <div className="w-1 h-1 bg-white/50 rounded-full"></div>
+                                        <div className="w-1 h-1 bg-white/50 rounded-full"></div>
+                                        <div className="w-1 h-1 bg-white/50 rounded-full"></div>
+                                    </div>
+                                </div>
+                            </div>
                         </div>
+                        
+                        {/* CSS for video elements inside remote container */}
+                        <style>{`
+                            #remote-video-container video,
+                            [data-remote-video] video {
+                                width: 100% !important;
+                                height: 100% !important;
+                                object-fit: contain !important;
+                            }
+                        `}</style>
                         
                         {/* Controls */}
                         <div className="p-4 bg-gradient-to-t from-slate-900 to-transparent absolute bottom-0 left-0 right-0 flex justify-center gap-3 z-20">

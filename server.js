@@ -232,6 +232,8 @@ const callHistorySchema = new mongoose.Schema({
     recordingUrl: { type: String },
     notes: { type: String },
     direction: { type: String, enum: ['inbound', 'outbound'], default: 'outbound' },
+    callType: { type: String, enum: ['voice', 'video'], default: 'voice' }, // voice or video call
+    roomName: { type: String }, // For video calls - the room name
     timestamp: { type: Date, default: Date.now, index: true }
 });
 // Compound indexes for common queries
@@ -1057,15 +1059,18 @@ app.get('/api/call-history', async (req, res) => {
 
 // Add call to history
 app.post('/api/call-history', async (req, res) => {
-    const { studentName, studentPhone, teacherName, teacherId, status, duration, callSid, recordingUrl, notes } = req.body;
+    const { studentName, studentPhone, teacherName, teacherId, status, duration, callSid, recordingUrl, notes, callType, roomName, direction } = req.body;
     
-    console.log('📝 Adding call to history:', studentName, status);
+    console.log('📝 Adding call to history:', studentName, status, callType || 'voice');
     
     try {
         if (dbConnected) {
             const call = await CallHistory.create({
                 studentName, studentPhone, teacherName, teacherId, 
-                status, duration, callSid, recordingUrl, notes
+                status, duration, callSid, recordingUrl, notes,
+                callType: callType || 'voice',
+                roomName: roomName || null,
+                direction: direction || 'outbound'
             });
             console.log('✅ Call history saved to database');
             return res.json({ success: true, call });
@@ -1074,6 +1079,9 @@ app.post('/api/call-history', async (req, res) => {
                 id: Date.now().toString(),
                 studentName, studentPhone, teacherName, teacherId,
                 status, duration, callSid, recordingUrl, notes,
+                callType: callType || 'voice',
+                roomName: roomName || null,
+                direction: direction || 'outbound',
                 timestamp: new Date()
             };
             inMemoryCallHistory.unshift(call);
@@ -1082,6 +1090,54 @@ app.post('/api/call-history', async (req, res) => {
     } catch (err) {
         console.error('Add call history error:', err);
         res.status(500).json({ success: false, error: 'Failed to save call history' });
+    }
+});
+
+// Delete call history records (admin only)
+app.post('/api/call-history/delete', async (req, res) => {
+    const { ids } = req.body;
+    
+    if (!ids || !Array.isArray(ids) || ids.length === 0) {
+        return res.status(400).json({ success: false, error: 'No IDs provided for deletion' });
+    }
+    
+    console.log('🗑️ Deleting call history records:', ids.length, 'items');
+    
+    try {
+        if (dbConnected) {
+            // Try to delete by _id first, then by callSid
+            const result = await CallHistory.deleteMany({
+                $or: [
+                    { _id: { $in: ids.filter(id => id.match(/^[0-9a-fA-F]{24}$/)) } },
+                    { callSid: { $in: ids } }
+                ]
+            });
+            
+            console.log(`✅ Deleted ${result.deletedCount} call history records from database`);
+            return res.json({ 
+                success: true, 
+                deletedCount: result.deletedCount,
+                message: `Successfully deleted ${result.deletedCount} record(s)`
+            });
+        } else {
+            // In-memory deletion
+            const initialLength = inMemoryCallHistory.length;
+            inMemoryCallHistory = inMemoryCallHistory.filter(call => {
+                const callId = call.id || call._id || call.callSid;
+                return !ids.includes(callId) && !ids.includes(String(callId));
+            });
+            const deletedCount = initialLength - inMemoryCallHistory.length;
+            
+            console.log(`✅ Deleted ${deletedCount} call history records from memory`);
+            return res.json({ 
+                success: true, 
+                deletedCount,
+                message: `Successfully deleted ${deletedCount} record(s)`
+            });
+        }
+    } catch (err) {
+        console.error('Delete call history error:', err);
+        res.status(500).json({ success: false, error: 'Failed to delete call history records' });
     }
 });
 

@@ -159,24 +159,44 @@
             // Enable noise cancellation
             enable() {
                 this.enabled = true;
-                if (this.bypassGain && this.gainNode) {
-                    // Route through filters with smooth transition
-                    this.bypassGain.gain.setTargetAtTime(0, this.audioContext.currentTime, 0.1);
-                    this.gainNode.gain.setTargetAtTime(1.0, this.audioContext.currentTime, 0.1);
+                if (this.audioContext && this.bypassGain && this.gainNode) {
+                    try {
+                        // Route through filters with smooth transition
+                        const now = this.audioContext.currentTime;
+                        this.bypassGain.gain.setTargetAtTime(0, now, 0.1);
+                        this.gainNode.gain.setTargetAtTime(1.0, now, 0.1);
+                        console.log('🔇 Noise Cancellation ENABLED (filters active)');
+                    } catch (err) {
+                        console.error('Error enabling NC:', err);
+                        // Fallback: set values directly
+                        this.bypassGain.gain.value = 0;
+                        this.gainNode.gain.value = 1.0;
+                    }
+                } else {
+                    console.log('🔇 Noise Cancellation ENABLED (audio context not ready)');
                 }
-                console.log('🔇 Noise Cancellation ENABLED');
                 return this.enabled;
             }
             
             // Disable noise cancellation
             disable() {
                 this.enabled = false;
-                if (this.bypassGain && this.gainNode) {
-                    // Bypass filters with smooth transition
-                    this.bypassGain.gain.setTargetAtTime(1, this.audioContext.currentTime, 0.1);
-                    this.gainNode.gain.setTargetAtTime(0, this.audioContext.currentTime, 0.1);
+                if (this.audioContext && this.bypassGain && this.gainNode) {
+                    try {
+                        // Bypass filters with smooth transition
+                        const now = this.audioContext.currentTime;
+                        this.bypassGain.gain.setTargetAtTime(1, now, 0.1);
+                        this.gainNode.gain.setTargetAtTime(0, now, 0.1);
+                        console.log('🔊 Noise Cancellation DISABLED (bypass active)');
+                    } catch (err) {
+                        console.error('Error disabling NC:', err);
+                        // Fallback: set values directly
+                        this.bypassGain.gain.value = 1;
+                        this.gainNode.gain.value = 0;
+                    }
+                } else {
+                    console.log('🔊 Noise Cancellation DISABLED (audio context not ready)');
                 }
-                console.log('🔊 Noise Cancellation DISABLED');
                 return this.enabled;
             }
             
@@ -3780,8 +3800,9 @@
                     // Initialize noise cancellation before connecting
                     await noiseCancellation.initialize();
                     
-                    // Get noise-cancelled audio track
-                    const localStream = await navigator.mediaDevices.getUserMedia({
+                    // Get raw audio/video stream
+                    console.log('📹 Getting camera and microphone...');
+                    const rawStream = await navigator.mediaDevices.getUserMedia({
                         audio: {
                             echoCancellation: true,
                             noiseSuppression: true,
@@ -3792,25 +3813,87 @@
                         video: { width: 640, height: 480, facingMode: 'user' }
                     });
                     
-                    // Create local tracks from processed stream
-                    const localTracks = await window.Twilio.Video.createLocalTracks({
-                        audio: { 
-                            name: 'microphone',
-                            // Use the processed audio track
-                            ...localStream.getAudioTracks()[0].getSettings()
-                        },
-                        video: { 
-                            name: 'camera',
-                            width: 640, 
-                            height: 480 
-                        }
+                    // Apply professional noise cancellation to audio
+                    console.log('🔇 Applying noise cancellation...');
+                    const processedStream = await noiseCancellation.processStream(rawStream);
+                    
+                    // Get the processed tracks
+                    const processedAudioTrack = processedStream.getAudioTracks()[0];
+                    const processedVideoTrack = processedStream.getVideoTracks()[0];
+                    
+                    if (!processedAudioTrack || !processedVideoTrack) {
+                        throw new Error('Failed to get audio/video tracks from processed stream');
+                    }
+                    
+                    console.log('✅ Processed tracks obtained:', {
+                        audio: processedAudioTrack.label,
+                        audioEnabled: processedAudioTrack.enabled,
+                        video: processedVideoTrack.label,
+                        videoEnabled: processedVideoTrack.enabled
                     });
                     
-                    // Connect to room with noise-cancelled audio
+                    // Create Twilio-compatible tracks from our processed media
+                    // Using try-catch with multiple fallback methods
+                    let localAudioTrack, localVideoTrack;
+                    let tracksCreated = false;
+                    
+                    // Method 1: Direct constructor with MediaStreamTrack
+                    try {
+                        if (window.Twilio.Video.LocalAudioTrack && window.Twilio.Video.LocalVideoTrack) {
+                            localAudioTrack = new window.Twilio.Video.LocalAudioTrack(processedAudioTrack, { name: 'microphone' });
+                            localVideoTrack = new window.Twilio.Video.LocalVideoTrack(processedVideoTrack, { name: 'camera' });
+                            tracksCreated = true;
+                            console.log('✅ Method 1: Created tracks via constructor');
+                        }
+                    } catch (err1) {
+                        console.log('⚠️ Method 1 failed:', err1.message);
+                    }
+                    
+                    // Method 2: Use createLocalAudioTrack/createLocalVideoTrack with track option
+                    if (!tracksCreated) {
+                        try {
+                            localAudioTrack = await window.Twilio.Video.createLocalAudioTrack({
+                                name: 'microphone'
+                            });
+                            localVideoTrack = await window.Twilio.Video.createLocalVideoTrack({
+                                name: 'camera',
+                                width: 640,
+                                height: 480
+                            });
+                            tracksCreated = true;
+                            console.log('✅ Method 2: Created tracks via createLocal functions');
+                            console.log('⚠️ NOTE: Using fallback - NC may not be fully applied to outgoing audio');
+                        } catch (err2) {
+                            console.log('⚠️ Method 2 failed:', err2.message);
+                        }
+                    }
+                    
+                    // Method 3: createLocalTracks with both
+                    if (!tracksCreated) {
+                        try {
+                            const tracks = await window.Twilio.Video.createLocalTracks({
+                                audio: { name: 'microphone' },
+                                video: { name: 'camera', width: 640, height: 480 }
+                            });
+                            localAudioTrack = tracks.find(t => t.kind === 'audio');
+                            localVideoTrack = tracks.find(t => t.kind === 'video');
+                            tracksCreated = true;
+                            console.log('✅ Method 3: Created tracks via createLocalTracks');
+                        } catch (err3) {
+                            console.log('⚠️ Method 3 failed:', err3.message);
+                            throw new Error('All track creation methods failed');
+                        }
+                    }
+                    
+                    console.log('🎥 Final tracks:', { 
+                        audio: localAudioTrack?.kind, 
+                        video: localVideoTrack?.kind 
+                    });
+                    
+                    // Connect to room with our tracks
                     const room = await window.Twilio.Video.connect(data.room.teacherToken, {
                         name: data.room.roomName,
-                        tracks: localTracks,
-                        // Enhanced audio settings for crystal clear voice
+                        tracks: [localAudioTrack, localVideoTrack],
                         preferredAudioCodecs: ['opus'],
                         preferredVideoCodecs: ['VP8'],
                         bandwidthProfile: {
@@ -3823,7 +3906,8 @@
                         networkQuality: { local: 1, remote: 1 }
                     });
                     
-                    console.log('🔇 Video call connected with noise cancellation enabled');
+                    console.log('✅ Connected to room:', room.name);
+                    console.log('   NC Status:', noiseCancellation.isEnabled() ? 'ON' : 'OFF');
                     
                     roomRef.current = room;
                     setIsInCall(true);
@@ -3836,25 +3920,64 @@
                         setCallDuration(prev => prev + 1);
                     }, 1000);
                     
-                    // Attach local video
-                    // Attach local video with proper styling
-                    room.localParticipant.tracks.forEach(publication => {
-                        if (publication.track && publication.track.kind === 'video') {
-                            const localContainer = localVideoRef.current;
-                            if (localContainer) {
-                                localContainer.innerHTML = '';
-                                const videoElement = publication.track.attach();
-                                // Style the local video element properly
+                    // Attach local video preview
+                    // Try multiple methods to ensure it shows
+                    const localContainer = localVideoRef.current;
+                    if (localContainer) {
+                        localContainer.innerHTML = '';
+                        
+                        let videoAttached = false;
+                        
+                        // Try 1: Attach from our localVideoTrack
+                        if (localVideoTrack && localVideoTrack.attach) {
+                            try {
+                                const videoElement = localVideoTrack.attach();
                                 videoElement.style.width = '100%';
                                 videoElement.style.height = '100%';
                                 videoElement.style.objectFit = 'cover';
                                 videoElement.style.borderRadius = '12px';
-                                videoElement.style.transform = 'scaleX(-1)'; // Mirror the video
+                                videoElement.style.transform = 'scaleX(-1)';
                                 localContainer.appendChild(videoElement);
-                                console.log('✅ Local video attached and styled (mirrored)');
+                                videoAttached = true;
+                                console.log('✅ Local video attached via localVideoTrack.attach()');
+                            } catch (attachErr) {
+                                console.log('⚠️ localVideoTrack.attach() failed:', attachErr.message);
                             }
                         }
-                    });
+                        
+                        // Try 2: Attach from room.localParticipant
+                        if (!videoAttached) {
+                            room.localParticipant.videoTracks.forEach(publication => {
+                                if (publication.track && !videoAttached) {
+                                    const videoElement = publication.track.attach();
+                                    videoElement.style.width = '100%';
+                                    videoElement.style.height = '100%';
+                                    videoElement.style.objectFit = 'cover';
+                                    videoElement.style.borderRadius = '12px';
+                                    videoElement.style.transform = 'scaleX(-1)';
+                                    localContainer.appendChild(videoElement);
+                                    videoAttached = true;
+                                    console.log('✅ Local video attached via localParticipant');
+                                }
+                            });
+                        }
+                        
+                        // Try 3: Use native video element with rawStream
+                        if (!videoAttached && rawStream) {
+                            const videoElement = document.createElement('video');
+                            videoElement.srcObject = rawStream;
+                            videoElement.autoplay = true;
+                            videoElement.muted = true; // Mute to prevent echo
+                            videoElement.playsInline = true;
+                            videoElement.style.width = '100%';
+                            videoElement.style.height = '100%';
+                            videoElement.style.objectFit = 'cover';
+                            videoElement.style.borderRadius = '12px';
+                            videoElement.style.transform = 'scaleX(-1)';
+                            localContainer.appendChild(videoElement);
+                            console.log('✅ Local video attached via native video element');
+                        }
+                    }
                     
                     // Handle existing participants
                     room.participants.forEach(handleParticipantConnected);

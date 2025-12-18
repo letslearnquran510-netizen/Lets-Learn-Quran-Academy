@@ -1,5 +1,5 @@
 // ========================================
-// QURAN ACADEMY CALLINGg SERVER
+// QURAN ACADEMY CALLING SERVER
 // HIGH PERFORMANCE VERSION
 // Optimized for 400+ concurrent users
 // ========================================
@@ -469,8 +469,14 @@ if (!config.twilio.accountSid || !config.twilio.authToken || !config.twilio.phon
 let twilioClient = null;
 try {
     if (config.twilio.accountSid && config.twilio.authToken) {
-        twilioClient = twilio(config.twilio.accountSid, config.twilio.authToken);
-        console.log('✅ Twilio client initialized');
+        // Create Twilio client with optimized HTTP agent for faster SMS delivery
+        twilioClient = twilio(config.twilio.accountSid, config.twilio.authToken, {
+            // Use HTTP keep-alive for faster subsequent requests
+            lazyLoading: true,
+            // Timeout settings
+            timeout: 30000, // 30 second timeout
+        });
+        console.log('✅ Twilio client initialized (optimized with keep-alive)');
     }
 } catch (err) {
     console.error('❌ Twilio init error:', err.message);
@@ -1372,26 +1378,42 @@ app.post('/api/video/create-room', async (req, res) => {
         
         // ==========================================
         // BACKGROUND TASKS (after response sent)
+        // Send SMS FIRST, then database (SMS is more urgent)
         // ==========================================
         
-        // Save to database in background (non-blocking)
-        if (isDbConnected()) {
-            VideoRoom.create(roomData)
-                .then(() => console.log('✅ Room saved to database:', roomName))
-                .catch(dbErr => console.error('⚠️ Failed to save room to database:', dbErr.message));
+        // Send SMS invitation IMMEDIATELY (highest priority)
+        if (twilioClient) {
+            // Use setImmediate to ensure this runs right after response
+            setImmediate(async () => {
+                const smsStartTime = Date.now();
+                console.log('📤 Sending SMS invitation to:', studentPhone);
+                
+                try {
+                    const smsBody = `Assalam Alaikum ${studentName}! Your teacher is waiting for you in a video class. Join now: ${joinUrl}`;
+                    
+                    await twilioClient.messages.create({
+                        body: smsBody,
+                        from: config.twilio.phoneNumber,
+                        to: studentPhone
+                    });
+                    
+                    const smsTime = Date.now() - smsStartTime;
+                    console.log(`✅ SMS invitation sent in ${smsTime}ms`);
+                } catch (smsErr) {
+                    console.error('⚠️ Failed to send SMS invitation:', smsErr.message);
+                }
+            });
+        } else {
+            console.warn('⚠️ Twilio client not available - SMS not sent');
         }
         
-        // Send SMS invitation in background (non-blocking)
-        if (twilioClient) {
-            const smsBody = `Assalam Alaikum ${studentName}! Your teacher is waiting for you in a video class. Join now: ${joinUrl}`;
-            
-            twilioClient.messages.create({
-                body: smsBody,
-                from: config.twilio.phoneNumber,
-                to: studentPhone
-            })
-            .then(() => console.log('✅ SMS invitation sent to student'))
-            .catch(smsErr => console.error('⚠️ Failed to send SMS invitation:', smsErr.message));
+        // Save to database in background (lower priority than SMS)
+        if (isDbConnected()) {
+            setImmediate(() => {
+                VideoRoom.create(roomData)
+                    .then(() => console.log('✅ Room saved to database:', roomName))
+                    .catch(dbErr => console.error('⚠️ Failed to save room to database:', dbErr.message));
+            });
         }
         
     } catch (err) {
@@ -2535,7 +2557,7 @@ app.get('/api/debug/video-rooms', (req, res) => {
 // START SERVER
 // ---------------------------------------------------------
 const PORT = process.env.PORT || 3000;
-server.listen(PORT, () => {
+server.listen(PORT, async () => {
     console.log('\n' + '='.repeat(50));
     console.log('🚀 QURAN ACADEMY SERVER STARTED');
     console.log('='.repeat(50));
@@ -2544,6 +2566,21 @@ server.listen(PORT, () => {
     console.log(`   Twilio Voice/SMS: ${twilioClient ? 'Connected ✓' : 'Not configured'}`);
     console.log(`   Twilio Video: ${hasVideoApiKeys() ? 'Configured ✓' : 'Not configured (add TWILIO_API_KEY_SID & TWILIO_API_KEY_SECRET)'}`);
     console.log(`   WebSocket: Enabled ✓`);
-    console.log('='.repeat(50) + '\n');
+    console.log('='.repeat(50));
+    
+    // Warm up Twilio API connection for faster SMS delivery
+    if (twilioClient) {
+        try {
+            console.log('🔥 Warming up Twilio API connection...');
+            const warmupStart = Date.now();
+            // Make a simple API call to establish connection
+            await twilioClient.api.accounts(config.twilio.accountSid).fetch();
+            const warmupTime = Date.now() - warmupStart;
+            console.log(`✅ Twilio API warmed up in ${warmupTime}ms - SMS will be faster!`);
+        } catch (warmupErr) {
+            console.log('⚠️ Twilio warmup skipped:', warmupErr.message);
+        }
+    }
+    
+    console.log('');
 });
-

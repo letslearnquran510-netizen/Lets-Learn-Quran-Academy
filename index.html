@@ -1,9 +1,13 @@
 <!DOCTYPE html>
 <html lang="en">
+<!-- Version: 2.5.0 - Build: 2024-12-19 - Delete Messages Feature + Login Fix -->
 <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Let's Learn Quran Academy - Professional System</title>
+    <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate" />
+    <meta http-equiv="Pragma" content="no-cache" />
+    <meta http-equiv="Expires" content="0" />
+    <title>Quran Academy - Professional System</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <style>
       /* Custom scrollbar for webkit browsers */
@@ -2153,8 +2157,8 @@
 
 
         const App = () => {
-            // User stored locally for session, but validated against server
-            const [currentUser, setCurrentUser] = useLocalStorage('quranAcademyUser', null);
+            // User NOT stored in localStorage - always show login screen on app launch
+            const [currentUser, setCurrentUser] = useState(null);
             
             // Dark mode state with localStorage persistence
             const [darkMode, setDarkMode] = useLocalStorage('quranAcademyDarkMode', false);
@@ -5215,7 +5219,7 @@
         };
 
         // --- Messages Section Component ---
-        const MessagesSection = ({ user, students, conversations, setConversations, messages, setMessages, addToast }) => {
+        const MessagesSection = ({ user, students, conversations, setConversations, messages, setMessages, addToast, darkMode }) => {
             const [selectedStudentId, setSelectedStudentId] = useState(null);
             const [chatMessages, setChatMessages] = useState([]);
             const [newMessage, setNewMessage] = useState('');
@@ -5223,6 +5227,12 @@
             const [isLoadingMessages, setIsLoadingMessages] = useState(false);
             const [searchTerm, setSearchTerm] = useState('');
             const messagesEndRef = useRef(null);
+            
+            // Delete feature states
+            const [selectedConversations, setSelectedConversations] = useState(new Set());
+            const [isDeleting, setIsDeleting] = useState(false);
+            const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
+            const [isSelectionMode, setIsSelectionMode] = useState(false);
             
             // Get selected student/conversation
             const selectedConversation = useMemo(() => 
@@ -5355,62 +5365,222 @@
                 }
             };
             
+            // Toggle conversation selection
+            const toggleSelectConversation = (convId, e) => {
+                e.stopPropagation();
+                setSelectedConversations(prev => {
+                    const newSet = new Set(prev);
+                    if (newSet.has(convId)) {
+                        newSet.delete(convId);
+                    } else {
+                        newSet.add(convId);
+                    }
+                    return newSet;
+                });
+            };
+            
+            // Toggle select all conversations
+            const toggleSelectAll = () => {
+                if (selectedConversations.size === filteredConversations.length) {
+                    setSelectedConversations(new Set());
+                } else {
+                    const allIds = new Set(filteredConversations.map(c => c.studentId || c._id));
+                    setSelectedConversations(allIds);
+                }
+            };
+            
+            // Clear selection
+            const clearSelection = () => {
+                setSelectedConversations(new Set());
+                setIsSelectionMode(false);
+            };
+            
+            // Show delete confirmation
+            const handleDeleteSelected = () => {
+                if (selectedConversations.size === 0) return;
+                setShowDeleteConfirm(true);
+            };
+            
+            // Execute delete conversations
+            const executeDeleteConversations = async () => {
+                setShowDeleteConfirm(false);
+                setIsDeleting(true);
+                
+                const API_URL = window.location.hostname === 'localhost' ? 'http://localhost:3000' : window.location.origin;
+                
+                try {
+                    const idsToDelete = Array.from(selectedConversations);
+                    console.log('🗑️ Deleting conversations:', idsToDelete);
+                    
+                    const response = await fetch(`${API_URL}/api/sms/conversations/delete`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ ids: idsToDelete })
+                    });
+                    
+                    const result = await response.json();
+                    console.log('🗑️ Delete response:', result);
+                    
+                    if (result.success) {
+                        // Remove from local state
+                        setConversations(prev => prev.filter(c => {
+                            const convId = c.studentId || c._id;
+                            return !idsToDelete.includes(convId);
+                        }));
+                        
+                        // Clear selection
+                        setSelectedConversations(new Set());
+                        setIsSelectionMode(false);
+                        
+                        // If deleted conversation was selected, clear it
+                        if (selectedStudentId && idsToDelete.includes(selectedStudentId)) {
+                            setSelectedStudentId(null);
+                            setChatMessages([]);
+                        }
+                        
+                        addToast(`Successfully deleted ${result.deletedCount || idsToDelete.length} conversation(s)`, 'success');
+                    } else {
+                        addToast('Failed to delete: ' + (result.error || 'Unknown error'), 'error');
+                    }
+                } catch (err) {
+                    console.error('Delete error:', err);
+                    addToast('Failed to delete conversations. Please try again.', 'error');
+                } finally {
+                    setIsDeleting(false);
+                }
+            };
+            
+            // Check if all filtered conversations are selected
+            const allSelected = filteredConversations.length > 0 && 
+                filteredConversations.every(c => selectedConversations.has(c.studentId || c._id));
+            
             return (
-                <div className="bg-white rounded-2xl shadow-sm border border-slate-200/80 h-[calc(100vh-200px)] flex overflow-hidden">
+                <div className={`rounded-2xl shadow-sm border h-[calc(100vh-200px)] flex overflow-hidden dark-transition ${darkMode ? 'bg-slate-800 border-slate-700' : 'bg-white border-slate-200/80'}`}>
                     {/* Conversations List */}
-                    <div className="w-1/3 border-r border-slate-200 flex flex-col">
-                        <div className="p-4 border-b border-slate-200">
-                            <div className="relative">
-                                <input 
-                                    type="text" 
-                                    placeholder="Search conversations..." 
-                                    value={searchTerm}
-                                    onChange={e => setSearchTerm(e.target.value)}
-                                    className="w-full p-3 pl-10 border border-slate-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 outline-none text-sm"
-                                />
-                                <Icons.Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400" />
+                    <div className={`w-1/3 border-r flex flex-col ${darkMode ? 'border-slate-700' : 'border-slate-200'}`}>
+                        <div className={`p-4 border-b ${darkMode ? 'border-slate-700' : 'border-slate-200'}`}>
+                            <div className="flex items-center gap-2 mb-3">
+                                <div className="relative flex-1">
+                                    <input 
+                                        type="text" 
+                                        placeholder="Search conversations..." 
+                                        value={searchTerm}
+                                        onChange={e => setSearchTerm(e.target.value)}
+                                        className={`w-full p-3 pl-10 border rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 outline-none text-sm dark-transition ${darkMode ? 'bg-slate-700 border-slate-600 text-white placeholder-slate-400' : 'border-slate-300'}`}
+                                    />
+                                    <Icons.Search className={`absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 ${darkMode ? 'text-slate-400' : 'text-slate-400'}`} />
+                                </div>
+                                {/* Selection Mode Toggle - Admin Only */}
+                                {user.type === 'admin' && (
+                                    <button
+                                        onClick={() => {
+                                            setIsSelectionMode(!isSelectionMode);
+                                            if (isSelectionMode) {
+                                                setSelectedConversations(new Set());
+                                            }
+                                        }}
+                                        className={`p-3 rounded-lg transition-colors ${
+                                            isSelectionMode 
+                                                ? 'bg-indigo-500 text-white' 
+                                                : (darkMode ? 'bg-slate-700 text-slate-300 hover:bg-slate-600' : 'bg-slate-100 text-slate-600 hover:bg-slate-200')
+                                        }`}
+                                        title={isSelectionMode ? 'Exit selection mode' : 'Select conversations'}
+                                    >
+                                        <Icons.CheckCircle className="w-5 h-5" />
+                                    </button>
+                                )}
                             </div>
+                            
+                            {/* Selection Controls - Show when in selection mode */}
+                            {isSelectionMode && user.type === 'admin' && (
+                                <div className={`flex items-center justify-between p-2 rounded-lg ${darkMode ? 'bg-slate-700' : 'bg-slate-100'}`}>
+                                    <div className="flex items-center gap-2">
+                                        <input
+                                            type="checkbox"
+                                            checked={allSelected}
+                                            onChange={toggleSelectAll}
+                                            className="w-4 h-4 rounded text-indigo-600 focus:ring-indigo-500 cursor-pointer"
+                                        />
+                                        <span className={`text-sm ${darkMode ? 'text-slate-300' : 'text-slate-600'}`}>
+                                            {selectedConversations.size > 0 
+                                                ? `${selectedConversations.size} selected` 
+                                                : 'Select all'}
+                                        </span>
+                                    </div>
+                                    {selectedConversations.size > 0 && (
+                                        <button
+                                            onClick={handleDeleteSelected}
+                                            disabled={isDeleting}
+                                            className="px-3 py-1 text-sm font-semibold text-white bg-red-500 hover:bg-red-600 rounded-lg transition-colors flex items-center gap-1 disabled:opacity-50"
+                                        >
+                                            {isDeleting ? (
+                                                <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin"></div>
+                                            ) : (
+                                                <>
+                                                    <Icons.Trash className="w-4 h-4" />
+                                                    Delete
+                                                </>
+                                            )}
+                                        </button>
+                                    )}
+                                </div>
+                            )}
                         </div>
                         
                         <div className="flex-1 overflow-y-auto custom-scrollbar">
                             {filteredConversations.length > 0 ? (
-                                filteredConversations.map(conv => (
-                                    <div 
-                                        key={conv.studentId || conv._id}
-                                        onClick={() => setSelectedStudentId(conv.studentId)}
-                                        className={`p-4 border-b border-slate-100 cursor-pointer hover:bg-slate-50 transition-colors ${
-                                            selectedStudentId === conv.studentId ? 'bg-indigo-50 border-l-4 border-l-indigo-500' : ''
-                                        }`}
-                                    >
-                                        <div className="flex items-center gap-3">
-                                            <StudentAvatar name={conv.studentName} size="md" />
-                                            <div className="flex-1 min-w-0">
-                                                <div className="flex justify-between items-center">
-                                                    <p className="font-semibold text-slate-800 truncate">{conv.studentName}</p>
-                                                    <span className="text-xs text-slate-400">{formatTime(conv.lastMessageTime)}</span>
-                                                </div>
-                                                <div className="flex justify-between items-center mt-1">
-                                                    <p className="text-sm text-slate-500 truncate">
-                                                        {conv.lastMessageDirection === 'outbound' && <span className="text-indigo-500">You: </span>}
-                                                        {conv.lastMessage}
-                                                    </p>
-                                                    {conv.unreadCount > 0 && (
-                                                        <span className="bg-indigo-500 text-white text-xs rounded-full px-2 py-0.5 ml-2">
-                                                            {conv.unreadCount}
-                                                        </span>
-                                                    )}
+                                filteredConversations.map(conv => {
+                                    const convId = conv.studentId || conv._id;
+                                    const isSelected = selectedConversations.has(convId);
+                                    
+                                    return (
+                                        <div 
+                                            key={convId}
+                                            onClick={() => !isSelectionMode && setSelectedStudentId(conv.studentId)}
+                                            className={`p-4 border-b cursor-pointer transition-colors ${darkMode ? 'border-slate-700 hover:bg-slate-700/50' : 'border-slate-100 hover:bg-slate-50'} ${
+                                                selectedStudentId === conv.studentId ? (darkMode ? 'bg-indigo-900/30 border-l-4 border-l-indigo-500' : 'bg-indigo-50 border-l-4 border-l-indigo-500') : ''
+                                            } ${isSelected ? (darkMode ? 'bg-indigo-900/20' : 'bg-indigo-50') : ''}`}
+                                        >
+                                            <div className="flex items-center gap-3">
+                                                {/* Checkbox - Show in selection mode */}
+                                                {isSelectionMode && user.type === 'admin' && (
+                                                    <input
+                                                        type="checkbox"
+                                                        checked={isSelected}
+                                                        onChange={(e) => toggleSelectConversation(convId, e)}
+                                                        onClick={(e) => e.stopPropagation()}
+                                                        className="w-5 h-5 rounded text-indigo-600 focus:ring-indigo-500 cursor-pointer flex-shrink-0"
+                                                    />
+                                                )}
+                                                <StudentAvatar name={conv.studentName} size="md" />
+                                                <div className="flex-1 min-w-0">
+                                                    <div className="flex justify-between items-center">
+                                                        <p className={`font-semibold truncate ${darkMode ? 'text-white' : 'text-slate-800'}`}>{conv.studentName}</p>
+                                                        <span className={`text-xs ${darkMode ? 'text-slate-500' : 'text-slate-400'}`}>{formatTime(conv.lastMessageTime)}</span>
+                                                    </div>
+                                                    <div className="flex justify-between items-center mt-1">
+                                                        <p className={`text-sm truncate ${darkMode ? 'text-slate-400' : 'text-slate-500'}`}>
+                                                            {conv.lastMessageDirection === 'outbound' && <span className="text-indigo-500">You: </span>}
+                                                            {conv.lastMessage}
+                                                        </p>
+                                                        {conv.unreadCount > 0 && (
+                                                            <span className="bg-indigo-500 text-white text-xs rounded-full px-2 py-0.5 ml-2">
+                                                                {conv.unreadCount}
+                                                            </span>
+                                                        )}
+                                                    </div>
                                                 </div>
                                             </div>
                                         </div>
-                                    </div>
-                                ))
+                                    );
+                                })
                             ) : (
-                                <div className="p-4 text-center text-slate-500">
-                                    <Icons.Messages className="w-12 h-12 mx-auto mb-2 text-slate-300" />
+                                <div className={`p-4 text-center ${darkMode ? 'text-slate-500' : 'text-slate-500'}`}>
+                                    <Icons.Messages className={`w-12 h-12 mx-auto mb-2 ${darkMode ? 'text-slate-600' : 'text-slate-300'}`} />
                                     <p>No conversations yet</p>
                                     <p className="text-sm mt-1">Select a student below to start messaging</p>
                                 </div>
-                            )}
+                            )}}
                             
                             {/* Students without conversations */}
                             {students.length > 0 && (
@@ -5530,13 +5700,59 @@
                                 </div>
                             </>
                         ) : (
-                            <div className="flex-1 flex flex-col justify-center items-center text-slate-400 bg-slate-50">
+                            <div className={`flex-1 flex flex-col justify-center items-center ${darkMode ? 'text-slate-500 bg-slate-900/50' : 'text-slate-400 bg-slate-50'}`}>
                                 <Icons.Messages className="w-20 h-20 mb-4" />
-                                <p className="text-xl font-semibold text-slate-600">Select a conversation</p>
+                                <p className={`text-xl font-semibold ${darkMode ? 'text-slate-400' : 'text-slate-600'}`}>Select a conversation</p>
                                 <p className="text-sm mt-2">Choose a conversation from the list or start a new one</p>
                             </div>
                         )}
                     </div>
+                    
+                    {/* Delete Confirmation Modal */}
+                    {showDeleteConfirm && (
+                        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 animate-fade-in">
+                            <div className={`p-6 rounded-2xl shadow-2xl max-w-md w-full mx-4 animate-scale-up ${darkMode ? 'bg-slate-800' : 'bg-white'}`}>
+                                {/* Warning Icon */}
+                                <div className="flex justify-center mb-4">
+                                    <div className="w-16 h-16 rounded-full bg-red-100 flex items-center justify-center">
+                                        <svg xmlns="http://www.w3.org/2000/svg" className="w-10 h-10 text-red-500" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                                            <path strokeLinecap="round" strokeLinejoin="round" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
+                                        </svg>
+                                    </div>
+                                </div>
+                                
+                                {/* Title */}
+                                <h3 className={`text-xl font-bold text-center mb-2 ${darkMode ? 'text-white' : 'text-slate-800'}`}>
+                                    Delete Conversations?
+                                </h3>
+                                
+                                {/* Message */}
+                                <p className={`text-center mb-2 ${darkMode ? 'text-slate-300' : 'text-slate-600'}`}>
+                                    You are about to delete <span className="font-bold text-red-500">{selectedConversations.size}</span> conversation{selectedConversations.size > 1 ? 's' : ''} and all their messages.
+                                </p>
+                                <p className={`text-center text-sm mb-6 ${darkMode ? 'text-slate-400' : 'text-slate-500'}`}>
+                                    ⚠️ This action is <span className="font-bold text-red-500">permanent</span> and cannot be recovered.
+                                </p>
+                                
+                                {/* Buttons */}
+                                <div className="flex gap-3">
+                                    <button
+                                        onClick={() => setShowDeleteConfirm(false)}
+                                        className={`flex-1 px-4 py-3 font-semibold rounded-xl transition-colors ${darkMode ? 'bg-slate-700 text-slate-200 hover:bg-slate-600' : 'bg-slate-200 text-slate-700 hover:bg-slate-300'}`}
+                                    >
+                                        Cancel
+                                    </button>
+                                    <button
+                                        onClick={executeDeleteConversations}
+                                        className="flex-1 px-4 py-3 bg-red-500 text-white font-semibold rounded-xl hover:bg-red-600 transition-colors flex items-center justify-center gap-2"
+                                    >
+                                        <Icons.Trash className="w-5 h-5" />
+                                        Delete Permanently
+                                    </button>
+                                </div>
+                            </div>
+                        </div>
+                    )}
                 </div>
             );
         };

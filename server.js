@@ -1353,6 +1353,77 @@ app.get('/api/sms/unread-count', async (req, res) => {
     }
 });
 
+// Delete SMS conversations (admin only)
+app.post('/api/sms/conversations/delete', async (req, res) => {
+    const { ids } = req.body;
+    
+    console.log('🗑️ Delete conversations request received');
+    console.log('   IDs received:', ids);
+    
+    if (!ids || !Array.isArray(ids) || ids.length === 0) {
+        console.log('❌ No valid IDs provided');
+        return res.status(400).json({ success: false, error: 'No IDs provided for deletion' });
+    }
+    
+    console.log('🗑️ Attempting to delete', ids.length, 'conversations');
+    
+    try {
+        if (dbConnected) {
+            const stringIds = ids.map(id => String(id));
+            
+            // Delete conversations
+            const convResult = await Conversation.deleteMany({
+                $or: [
+                    { studentId: { $in: stringIds } },
+                    { _id: { $in: stringIds.filter(id => /^[0-9a-fA-F]{24}$/.test(id)) } }
+                ]
+            });
+            
+            // Also delete associated messages
+            const msgResult = await Message.deleteMany({
+                studentId: { $in: stringIds }
+            });
+            
+            console.log(`✅ Deleted ${convResult.deletedCount} conversations and ${msgResult.deletedCount} messages from database`);
+            return res.json({ 
+                success: true, 
+                deletedCount: convResult.deletedCount,
+                messagesDeleted: msgResult.deletedCount,
+                message: `Successfully deleted ${convResult.deletedCount} conversation(s)`
+            });
+        } else {
+            // In-memory deletion
+            const stringIds = ids.map(id => String(id));
+            const initialConvLength = inMemoryConversations.length;
+            const initialMsgLength = inMemoryMessages.length;
+            
+            inMemoryConversations = inMemoryConversations.filter(c => {
+                const convId = String(c.studentId || c._id || '');
+                return !stringIds.includes(convId);
+            });
+            
+            inMemoryMessages = inMemoryMessages.filter(m => {
+                const studentId = String(m.studentId || '');
+                return !stringIds.includes(studentId);
+            });
+            
+            const deletedConvCount = initialConvLength - inMemoryConversations.length;
+            const deletedMsgCount = initialMsgLength - inMemoryMessages.length;
+            
+            console.log(`✅ Deleted ${deletedConvCount} conversations and ${deletedMsgCount} messages from memory`);
+            return res.json({ 
+                success: true, 
+                deletedCount: deletedConvCount,
+                messagesDeleted: deletedMsgCount,
+                message: `Successfully deleted ${deletedConvCount} conversation(s)`
+            });
+        }
+    } catch (err) {
+        console.error('❌ Delete conversations error:', err);
+        res.status(500).json({ success: false, error: 'Failed to delete conversations: ' + err.message });
+    }
+});
+
 // ==========================================================
 // VIDEO CALLING API
 // ==========================================================

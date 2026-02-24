@@ -2410,6 +2410,11 @@
                     });
                     const data = await res.json();
                     if (data.success) {
+                        // Skip adding to local state if server detected it as duplicate
+                        if (data.duplicate) {
+                            console.log('⚠️ Server detected duplicate call history, skipping local add');
+                            return { success: true };
+                        }
                         const newCall = { ...data.call, id: data.call._id || data.call.id };
                         setCallHistory(prev => [newCall, ...prev]);
                         return { success: true };

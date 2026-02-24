@@ -2037,17 +2037,21 @@
             device: null,
             activeConnection: null,
             identity: null,
-            onConnectionAccepted: null,  // callback when connection is established
-            onConnectionDisconnected: null, // callback when call ends
+            onConnectionAccepted: null,
+            onConnectionDisconnected: null,
             isReady: false,
             tokenRefreshTimer: null,
+            offlineRetryCount: 0,
+            maxOfflineRetries: 3,
+            initAttempts: 0,
             
             async init(identity) {
                 this.identity = identity;
+                this.initAttempts++;
                 
                 // Check if Twilio SDK is loaded
                 if (typeof Twilio === 'undefined' || !Twilio.Device) {
-                    console.log('⚠️ Twilio Voice SDK not loaded - incoming calls via browser disabled');
+                    console.log('⚠️ Twilio Voice SDK not loaded');
                     return false;
                 }
                 
@@ -2063,8 +2067,16 @@
                     
                     if (!data.success) {
                         console.log('⚠️ Voice token not available:', data.error);
+                        // If server not ready yet, retry after 10 seconds (max 3 times)
+                        if (this.initAttempts < 4) {
+                            console.log(`   Retrying in 10s (attempt ${this.initAttempts}/3)...`);
+                            setTimeout(() => this.init(identity), 10000);
+                        }
                         return false;
                     }
+                    
+                    // Reset retry counters on success
+                    this.offlineRetryCount = 0;
                     
                     // Setup Twilio Device
                     Twilio.Device.setup(data.token, {
@@ -2078,6 +2090,7 @@
                     Twilio.Device.ready((device) => {
                         console.log('📞 Twilio Voice Device READY - identity:', data.identity);
                         this.isReady = true;
+                        this.offlineRetryCount = 0;
                     });
                     
                     // Device error
@@ -2085,7 +2098,7 @@
                         console.error('📞 Twilio Voice Device error:', error.message);
                     });
                     
-                    // INCOMING CONNECTION - from <Dial><Client> when admin answers incoming call
+                    // INCOMING CONNECTION - from <Dial><Client>
                     Twilio.Device.incoming((conn) => {
                         console.log('📞 Twilio Device: Incoming connection received');
                         console.log('   From:', conn.parameters.From);
@@ -2096,14 +2109,12 @@
                         
                         console.log('📞 Connection ACCEPTED - voice connected!');
                         
-                        // Notify UI
                         if (this.onConnectionAccepted) {
                             this.onConnectionAccepted(conn);
                         }
                         
-                        // Handle disconnect
                         conn.on('disconnect', () => {
-                            console.log('📞 Incoming connection DISCONNECTED');
+                            console.log('📞 Connection DISCONNECTED');
                             this.activeConnection = null;
                             if (this.onConnectionDisconnected) {
                                 this.onConnectionDisconnected();
@@ -2119,16 +2130,25 @@
                         });
                     });
                     
-                    // Device offline/token expired
+                    // Device offline - retry with limit to prevent infinite loop
                     Twilio.Device.offline((device) => {
-                        console.log('📞 Twilio Device offline - refreshing token...');
                         this.isReady = false;
-                        // Auto-refresh token after short delay
-                        setTimeout(() => this.refreshToken(), 3000);
+                        this.offlineRetryCount++;
+                        
+                        if (this.offlineRetryCount <= this.maxOfflineRetries) {
+                            console.log(`📞 Device offline - retry ${this.offlineRetryCount}/${this.maxOfflineRetries} in 10s...`);
+                            setTimeout(() => this.refreshToken(), 10000);
+                        } else {
+                            console.log('📞 Device offline - max retries reached. Will retry on next token refresh cycle.');
+                        }
                     });
                     
-                    // Refresh token every 50 minutes (token expires in 60)
-                    this.tokenRefreshTimer = setInterval(() => this.refreshToken(), 50 * 60 * 1000);
+                    // Refresh token every 50 minutes
+                    if (this.tokenRefreshTimer) clearInterval(this.tokenRefreshTimer);
+                    this.tokenRefreshTimer = setInterval(() => {
+                        this.offlineRetryCount = 0; // Reset on scheduled refresh
+                        this.refreshToken();
+                    }, 50 * 60 * 1000);
                     
                     console.log('📞 Twilio Voice Device initializing for:', data.identity);
                     return true;
@@ -2148,7 +2168,7 @@
                         body: JSON.stringify({ identity: this.identity })
                     });
                     const data = await response.json();
-                    if (data.success && Twilio.Device) {
+                    if (data.success && typeof Twilio !== 'undefined' && Twilio.Device) {
                         Twilio.Device.setup(data.token);
                         console.log('📞 Voice token refreshed');
                     }

@@ -239,7 +239,6 @@ const callHistorySchema = new mongoose.Schema({
 // Compound indexes for common queries
 callHistorySchema.index({ teacherId: 1, timestamp: -1 });
 callHistorySchema.index({ timestamp: -1 }); // For sorting by recent
-callHistorySchema.index({ callSid: 1 }, { unique: true, sparse: true }); // Prevent duplicate entries
 
 // SMS Message Schema
 const messageSchema = new mongoose.Schema({

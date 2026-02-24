@@ -239,6 +239,7 @@ const callHistorySchema = new mongoose.Schema({
 // Compound indexes for common queries
 callHistorySchema.index({ teacherId: 1, timestamp: -1 });
 callHistorySchema.index({ timestamp: -1 }); // For sorting by recent
+callHistorySchema.index({ callSid: 1 }, { unique: true, sparse: true }); // Prevent duplicate entries
 
 // SMS Message Schema
 const messageSchema = new mongoose.Schema({
@@ -1064,6 +1065,23 @@ app.post('/api/call-history', async (req, res) => {
     console.log('📝 Adding call to history:', studentName, status, callType || 'voice');
     
     try {
+        // DEDUPLICATION: If callSid is provided, check if this call already exists
+        if (callSid) {
+            if (dbConnected) {
+                const existing = await CallHistory.findOne({ callSid });
+                if (existing) {
+                    console.log('⚠️ Duplicate call history detected for callSid:', callSid, '- skipping');
+                    return res.json({ success: true, call: existing, duplicate: true });
+                }
+            } else {
+                const existing = inMemoryCallHistory.find(c => c.callSid === callSid);
+                if (existing) {
+                    console.log('⚠️ Duplicate call history detected (in-memory) for callSid:', callSid, '- skipping');
+                    return res.json({ success: true, call: existing, duplicate: true });
+                }
+            }
+        }
+        
         if (dbConnected) {
             const call = await CallHistory.create({
                 studentName, studentPhone, teacherName, teacherId, 
@@ -1088,6 +1106,14 @@ app.post('/api/call-history', async (req, res) => {
             return res.json({ success: true, call });
         }
     } catch (err) {
+        // Handle MongoDB duplicate key error (code 11000) gracefully
+        if (err.code === 11000 && callSid) {
+            console.log('⚠️ Duplicate key error for callSid:', callSid, '- returning existing record');
+            try {
+                const existing = await CallHistory.findOne({ callSid });
+                if (existing) return res.json({ success: true, call: existing, duplicate: true });
+            } catch (e) { /* fall through */ }
+        }
         console.error('Add call history error:', err);
         res.status(500).json({ success: false, error: 'Failed to save call history' });
     }

@@ -2337,27 +2337,42 @@ app.post('/webhooks/voice-incoming', async (req, res) => {
     console.log('   CallSid:', CallSid);
     console.log('   From:', From);
     console.log('   To:', To);
-    console.log('   Status:', CallStatus);
     console.log('='.repeat(60));
     
-    // CRITICAL: Send TwiML response IMMEDIATELY to avoid Twilio timeout
-    // Twilio only waits 15 seconds - if we wait for DB lookup, it will timeout
+    // STEP 1: Store call in Map IMMEDIATELY (before anything else)
+    // This ensures /api/inbound-call/answer can always find it
+    const incomingCallData = {
+        callSid: CallSid,
+        from: From,
+        to: To,
+        callerName: 'Unknown Caller', // Will be updated after DB lookup
+        studentId: null,
+        status: 'ringing',
+        startTime: Date.now(),
+        answeredBy: null,
+        answeredTime: null
+    };
+    inboundCalls.set(CallSid, incomingCallData);
+    console.log('   ✅ Call stored in memory map');
+    
+    // STEP 2: Send TwiML response IMMEDIATELY to avoid Twilio 15s timeout
     const twiml = `<?xml version="1.0" encoding="UTF-8"?>
 <Response>
     <Say voice="alice">Assalam Alaikum. Please wait while we connect you to a teacher.</Say>
+    <Pause length="1"/>
     <Play loop="0">https://api.twilio.com/cowbell.mp3</Play>
 </Response>`;
     
-    console.log('   📤 Sending TwiML response IMMEDIATELY');
+    console.log('   📤 Sending TwiML response');
     res.type('text/xml');
     res.send(twiml);
     
-    // BACKGROUND: Look up caller and broadcast to app (after response sent)
+    // STEP 3: BACKGROUND - Look up caller name and broadcast to app
     try {
         let callerName = 'Unknown Caller';
         let callerStudent = null;
         
-        // Quick DB lookup with timeout protection
+        // Quick DB lookup with 3s timeout protection
         if (isDbConnected()) {
             try {
                 const dbPromise = Student.findOne({ phone: From }).lean();
@@ -2377,26 +2392,15 @@ app.post('/webhooks/voice-incoming', async (req, res) => {
             console.log('   ⚠️ Caller not in student database');
         }
         
-        // Store incoming call data
-        const incomingCallData = {
-            callSid: CallSid,
-            from: From,
-            to: To,
-            callerName: callerName,
-            studentId: callerStudent?.id || callerStudent?._id || null,
-            status: 'ringing',
-            startTime: Date.now(),
-            answeredBy: null,
-            answeredTime: null
-        };
-        
-        inboundCalls.set(CallSid, incomingCallData);
+        // Update the stored call data with caller info
+        incomingCallData.callerName = callerName;
+        incomingCallData.studentId = callerStudent?.id || callerStudent?._id || null;
         
         // Broadcast incoming call to all connected clients
         broadcastIncomingCall(incomingCallData);
         console.log('   📢 Incoming call broadcast sent to app');
         
-        // Set a timeout to auto-mark as missed if not answered within 45 seconds
+        // Auto-mark as missed if not answered within 60 seconds
         setTimeout(() => {
             const call = inboundCalls.get(CallSid);
             if (call && call.status === 'ringing') {
@@ -2404,11 +2408,14 @@ app.post('/webhooks/voice-incoming', async (req, res) => {
                 call.status = 'missed';
                 broadcastIncomingCallStatus(CallSid, 'missed', { callerName, from: From });
                 saveInboundCallHistory(call, 'Missed', 0);
+                inboundCalls.delete(CallSid);
             }
-        }, 45000);
+        }, 60000);
         
     } catch (error) {
         console.error('❌ Error in incoming call background processing:', error);
+        // Still broadcast with default name so UI shows the call
+        broadcastIncomingCall(incomingCallData);
     }
 });
 
@@ -2494,39 +2501,44 @@ app.post('/api/inbound-call/answer', async (req, res) => {
     
     console.log('📞 Answering incoming call:', callSid, 'by:', answeredBy);
     
-    const incomingCall = inboundCalls.get(callSid);
-    
-    if (!incomingCall) {
-        return res.status(404).json({ 
-            success: false, 
-            error: 'Incoming call not found or already ended' 
-        });
+    if (!callSid || !answeredBy) {
+        return res.status(400).json({ success: false, error: 'callSid and answeredBy are required' });
     }
     
-    if (incomingCall.status !== 'ringing') {
-        return res.status(400).json({ 
-            success: false, 
-            error: 'Call is no longer ringing' 
-        });
-    }
+    // Get from Map if available (may not be there after server restart)
+    let incomingCall = inboundCalls.get(callSid);
     
     try {
-        // Update call with TwiML to connect
-        // This redirects the call to a conference or direct connection
+        // Sanitize identity to match Twilio Device registration
+        const sanitizedIdentity = answeredBy.replace(/[^a-zA-Z0-9]/g, '_');
+        
+        // Update call with TwiML to connect to the browser Client
         await twilioClient.calls(callSid).update({
             twiml: `<?xml version="1.0" encoding="UTF-8"?>
 <Response>
     <Say voice="alice">Connecting you now.</Say>
-    <Dial record="record-from-answer-dual" recordingStatusCallback="${config.publicUrl}/webhooks/recording-status">
-        <Client>${answeredBy.replace(/[^a-zA-Z0-9]/g, '_')}</Client>
+    <Dial record="record-from-answer-dual" recordingStatusCallback="${config.publicUrl}/webhooks/recording-status" recordingStatusCallbackEvent="completed">
+        <Client>${sanitizedIdentity}</Client>
     </Dial>
 </Response>`
         });
         
-        // Update call status
-        incomingCall.status = 'answered';
-        incomingCall.answeredBy = answeredBy;
-        incomingCall.answeredTime = Date.now();
+        console.log('   ✅ Twilio call updated - connecting to Client:', sanitizedIdentity);
+        
+        // Update Map if entry exists
+        if (incomingCall) {
+            incomingCall.status = 'answered';
+            incomingCall.answeredBy = answeredBy;
+            incomingCall.answeredTime = Date.now();
+        } else {
+            // Create a new entry if Map was empty (e.g. after server restart)
+            incomingCall = {
+                callSid, from: 'Unknown', to: '', callerName: 'Caller',
+                status: 'answered', answeredBy, answeredTime: Date.now(),
+                startTime: Date.now()
+            };
+            inboundCalls.set(callSid, incomingCall);
+        }
         
         // Broadcast that call was answered
         broadcastIncomingCallStatus(callSid, 'answered', {
@@ -2545,10 +2557,16 @@ app.post('/api/inbound-call/answer', async (req, res) => {
         
     } catch (error) {
         console.error('❌ Error answering call:', error);
-        res.status(500).json({ 
-            success: false, 
-            error: error.message 
-        });
+        
+        // Check if the call has already ended on Twilio's side
+        let errorMsg = error.message;
+        if (error.code === 20404 || error.message?.includes('not found')) {
+            errorMsg = 'Call has already ended. The caller may have hung up.';
+            // Clean up
+            if (incomingCall) inboundCalls.delete(callSid);
+        }
+        
+        res.status(500).json({ success: false, error: errorMsg });
     }
 });
 
@@ -2560,33 +2578,26 @@ app.post('/api/inbound-call/reject', async (req, res) => {
     
     const incomingCall = inboundCalls.get(callSid);
     
-    if (!incomingCall) {
-        return res.status(404).json({ 
-            success: false, 
-            error: 'Incoming call not found or already ended' 
-        });
-    }
-    
     try {
         // End the call with a message
         await twilioClient.calls(callSid).update({
             twiml: `<?xml version="1.0" encoding="UTF-8"?>
 <Response>
-    <Say voice="alice">${reason || 'We are currently unavailable. Please try again later.'}</Say>
+    <Say voice="alice">${(reason || 'We are currently unavailable. Please try again later.').replace(/[<>&'"]/g, '')}</Say>
     <Hangup/>
 </Response>`
         });
         
-        // Update call status
-        incomingCall.status = 'rejected';
-        
-        // Save to history
-        saveInboundCallHistory(incomingCall, 'Rejected', 0);
+        // Update call status and save history
+        if (incomingCall) {
+            incomingCall.status = 'rejected';
+            saveInboundCallHistory(incomingCall, 'Rejected', 0);
+        }
         
         // Broadcast rejection
         broadcastIncomingCallStatus(callSid, 'rejected', {
-            callerName: incomingCall.callerName,
-            from: incomingCall.from
+            callerName: incomingCall?.callerName || 'Unknown',
+            from: incomingCall?.from || ''
         });
         
         // Clean up
@@ -2594,17 +2605,13 @@ app.post('/api/inbound-call/reject', async (req, res) => {
         
         console.log('   ✅ Call rejected');
         
-        res.json({ 
-            success: true, 
-            message: 'Call rejected' 
-        });
+        res.json({ success: true, message: 'Call rejected' });
         
     } catch (error) {
         console.error('❌ Error rejecting call:', error);
-        res.status(500).json({ 
-            success: false, 
-            error: error.message 
-        });
+        // Still clean up on error
+        inboundCalls.delete(callSid);
+        res.status(500).json({ success: false, error: error.message });
     }
 });
 

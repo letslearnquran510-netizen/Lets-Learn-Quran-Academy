@@ -2338,16 +2338,34 @@ app.post('/webhooks/voice-incoming', async (req, res) => {
     console.log('   From:', From);
     console.log('   To:', To);
     console.log('   Status:', CallStatus);
-    console.log('   Direction:', Direction);
     console.log('='.repeat(60));
     
+    // CRITICAL: Send TwiML response IMMEDIATELY to avoid Twilio timeout
+    // Twilio only waits 15 seconds - if we wait for DB lookup, it will timeout
+    const twiml = `<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+    <Say voice="alice">Assalam Alaikum. Please wait while we connect you to a teacher.</Say>
+    <Play loop="0">https://api.twilio.com/cowbell.mp3</Play>
+</Response>`;
+    
+    console.log('   📤 Sending TwiML response IMMEDIATELY');
+    res.type('text/xml');
+    res.send(twiml);
+    
+    // BACKGROUND: Look up caller and broadcast to app (after response sent)
     try {
-        // Look up caller in students database
         let callerName = 'Unknown Caller';
         let callerStudent = null;
         
+        // Quick DB lookup with timeout protection
         if (isDbConnected()) {
-            callerStudent = await Student.findOne({ phone: From });
+            try {
+                const dbPromise = Student.findOne({ phone: From }).lean();
+                const timeoutPromise = new Promise((_, reject) => setTimeout(() => reject(new Error('DB timeout')), 3000));
+                callerStudent = await Promise.race([dbPromise, timeoutPromise]);
+            } catch (dbErr) {
+                console.log('   ⚠️ DB lookup skipped:', dbErr.message);
+            }
         } else {
             callerStudent = inMemoryStudents.find(s => s.phone === From);
         }
@@ -2376,45 +2394,21 @@ app.post('/webhooks/voice-incoming', async (req, res) => {
         
         // Broadcast incoming call to all connected clients
         broadcastIncomingCall(incomingCallData);
+        console.log('   📢 Incoming call broadcast sent to app');
         
-        // Generate TwiML response - Play music/message while waiting for answer
-        // The call will be kept alive for 60 seconds waiting for someone to answer
-        const twiml = `<?xml version="1.0" encoding="UTF-8"?>
-<Response>
-    <Say voice="alice">Incoming call from ${callerName.replace(/[<>&'"]/g, '')}. Please wait while we connect you.</Say>
-    <Play loop="0">http://com.twilio.sounds.music.s3.amazonaws.com/MARKOVICHAMP-B4.mp3</Play>
-</Response>`;
-        
-        console.log('   📤 Sending TwiML response (hold music)');
-        
-        res.type('text/xml');
-        res.send(twiml);
-        
-        // Set a timeout to auto-reject if not answered within 45 seconds
+        // Set a timeout to auto-mark as missed if not answered within 45 seconds
         setTimeout(() => {
             const call = inboundCalls.get(CallSid);
             if (call && call.status === 'ringing') {
                 console.log('⏰ Incoming call timeout - not answered:', CallSid);
                 call.status = 'missed';
                 broadcastIncomingCallStatus(CallSid, 'missed', { callerName, from: From });
-                
-                // Save missed call to history
                 saveInboundCallHistory(call, 'Missed', 0);
             }
         }, 45000);
         
     } catch (error) {
-        console.error('❌ Error handling incoming call:', error);
-        
-        // Fallback TwiML - just play a message
-        const twiml = `<?xml version="1.0" encoding="UTF-8"?>
-<Response>
-    <Say voice="alice">Thank you for calling Quran Academy. We are currently unavailable. Please try again later.</Say>
-    <Hangup/>
-</Response>`;
-        
-        res.type('text/xml');
-        res.send(twiml);
+        console.error('❌ Error in incoming call background processing:', error);
     }
 });
 

@@ -1453,9 +1453,10 @@ app.post('/api/sms/conversations/delete', async (req, res) => {
 // VIDEO CALLING API
 // ==========================================================
 
-// Twilio AccessToken for Video
+// Twilio AccessToken for Video and Voice
 const AccessToken = twilio.jwt.AccessToken;
 const VideoGrant = AccessToken.VideoGrant;
+const VoiceGrant = AccessToken.VoiceGrant;
 
 // Generate a unique room name
 function generateRoomName() {
@@ -1487,6 +1488,60 @@ function generateVideoToken(identity, roomName) {
     token.addGrant(videoGrant);
     return token.toJwt();
 }
+
+// Generate access token for voice (incoming calls in browser)
+function generateVoiceToken(identity) {
+    if (!hasVideoApiKeys()) {
+        throw new Error('API keys not configured. Please add TWILIO_API_KEY_SID and TWILIO_API_KEY_SECRET to environment variables.');
+    }
+    
+    const token = new AccessToken(
+        config.twilio.accountSid,
+        process.env.TWILIO_API_KEY_SID,
+        process.env.TWILIO_API_KEY_SECRET,
+        { identity: identity, ttl: 3600 } // 1 hour expiry
+    );
+    
+    const voiceGrant = new VoiceGrant({
+        incomingAllow: true
+    });
+    
+    token.addGrant(voiceGrant);
+    return token.toJwt();
+}
+
+// Voice token endpoint for browser-based incoming calls
+app.post('/api/voice-token', (req, res) => {
+    const { identity } = req.body;
+    
+    if (!identity) {
+        return res.status(400).json({ success: false, error: 'Identity required' });
+    }
+    
+    if (!hasVideoApiKeys()) {
+        return res.status(500).json({ 
+            success: false, 
+            error: 'Voice not configured. Add TWILIO_API_KEY_SID and TWILIO_API_KEY_SECRET.' 
+        });
+    }
+    
+    try {
+        // Sanitize identity to match what <Client> uses
+        const sanitizedIdentity = identity.replace(/[^a-zA-Z0-9]/g, '_');
+        const token = generateVoiceToken(sanitizedIdentity);
+        
+        console.log('🎤 Voice token generated for:', sanitizedIdentity);
+        
+        res.json({ 
+            success: true, 
+            token, 
+            identity: sanitizedIdentity 
+        });
+    } catch (error) {
+        console.error('❌ Voice token error:', error);
+        res.status(500).json({ success: false, error: error.message });
+    }
+});
 
 // Create a new video room and send invite to student
 app.post('/api/video/create-room', async (req, res) => {
@@ -2745,6 +2800,7 @@ server.listen(PORT, async () => {
     console.log(`   Database: ${isDbConnected() ? 'MongoDB Connected ✓' : 'Connecting... (state: ' + mongoose.connection.readyState + ')'}`);
     console.log(`   Twilio Voice/SMS: ${twilioClient ? 'Connected ✓' : 'Not configured'}`);
     console.log(`   Twilio Video: ${hasVideoApiKeys() ? 'Configured ✓' : 'Not configured (add TWILIO_API_KEY_SID & TWILIO_API_KEY_SECRET)'}`);
+    console.log(`   Twilio Voice Browser: ${hasVideoApiKeys() ? 'Configured ✓ (incoming calls enabled)' : 'Not configured'}`);
     console.log(`   WebSocket: Enabled ✓`);
     console.log('='.repeat(50));
     
@@ -2759,6 +2815,29 @@ server.listen(PORT, async () => {
             console.log(`✅ Twilio API warmed up in ${warmupTime}ms - SMS will be faster!`);
         } catch (warmupErr) {
             console.log('⚠️ Twilio warmup skipped:', warmupErr.message);
+        }
+        
+        // Auto-configure Twilio phone number for incoming calls
+        if (config.publicUrl && config.publicUrl !== 'http://localhost:3000') {
+            try {
+                console.log('📞 Configuring incoming call webhook...');
+                const numbers = await twilioClient.incomingPhoneNumbers.list({ phoneNumber: config.twilio.phoneNumber, limit: 1 });
+                if (numbers.length > 0) {
+                    await twilioClient.incomingPhoneNumbers(numbers[0].sid).update({
+                        voiceUrl: `${config.publicUrl}/webhooks/voice-incoming`,
+                        voiceMethod: 'POST',
+                        statusCallback: `${config.publicUrl}/webhooks/voice-incoming-status`,
+                        statusCallbackMethod: 'POST',
+                        smsUrl: `${config.publicUrl}/webhooks/sms-incoming`,
+                        smsMethod: 'POST'
+                    });
+                    console.log('✅ Incoming call webhook configured:', `${config.publicUrl}/webhooks/voice-incoming`);
+                } else {
+                    console.log('⚠️ Phone number not found in Twilio account');
+                }
+            } catch (webhookErr) {
+                console.log('⚠️ Webhook auto-config skipped:', webhookErr.message);
+            }
         }
     }
     

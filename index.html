@@ -3018,12 +3018,12 @@
             }, [stopTimer, stopPolling, stopTimeout]);
 
             const addCallToHistory = useCallback((call) => {
-                // Save to local state immediately for UI
-                setCallHistory(prev => [{ ...call, id: Date.now() }, ...prev]);
-                
-                // Also save to database via API
+                // Save to database via API (which also updates local state on success/failure)
                 if (addCallToHistoryAPI) {
                     addCallToHistoryAPI(call).catch(err => console.error('Failed to save call to database:', err));
+                } else {
+                    // Fallback: only add locally if no API function available
+                    setCallHistory(prev => [{ ...call, id: Date.now() }, ...prev]);
                 }
             }, [setCallHistory, addCallToHistoryAPI]);
 

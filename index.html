@@ -9,6 +9,7 @@
     <meta http-equiv="Expires" content="0" />
     <title>Quran Academy -- Professional System</title>
     <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://sdk.twilio.com/js/client/releases/1.14.0/twilio.min.js"></script>
     <style>
       /* Custom scrollbar for webkit browsers */
       .custom-scrollbar::-webkit-scrollbar {
@@ -2030,6 +2031,166 @@
             }
         };
 
+        // --- TWILIO VOICE DEVICE MANAGER ---
+        // Handles browser-based voice for receiving incoming calls
+        const twilioVoiceManager = {
+            device: null,
+            activeConnection: null,
+            identity: null,
+            onConnectionAccepted: null,  // callback when connection is established
+            onConnectionDisconnected: null, // callback when call ends
+            isReady: false,
+            tokenRefreshTimer: null,
+            
+            async init(identity) {
+                this.identity = identity;
+                
+                // Check if Twilio SDK is loaded
+                if (typeof Twilio === 'undefined' || !Twilio.Device) {
+                    console.log('⚠️ Twilio Voice SDK not loaded - incoming calls via browser disabled');
+                    return false;
+                }
+                
+                try {
+                    // Get voice token from server
+                    const response = await fetch(`${BACKEND_URL}/api/voice-token`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ identity })
+                    });
+                    
+                    const data = await response.json();
+                    
+                    if (!data.success) {
+                        console.log('⚠️ Voice token not available:', data.error);
+                        return false;
+                    }
+                    
+                    // Setup Twilio Device
+                    Twilio.Device.setup(data.token, {
+                        enableRingingState: true,
+                        debug: false,
+                        allowIncomingWhileBusy: false,
+                        codecPreferences: ['opus', 'pcmu']
+                    });
+                    
+                    // Device ready
+                    Twilio.Device.ready((device) => {
+                        console.log('📞 Twilio Voice Device READY - identity:', data.identity);
+                        this.isReady = true;
+                    });
+                    
+                    // Device error
+                    Twilio.Device.error((error) => {
+                        console.error('📞 Twilio Voice Device error:', error.message);
+                    });
+                    
+                    // INCOMING CONNECTION - from <Dial><Client> when admin answers incoming call
+                    Twilio.Device.incoming((conn) => {
+                        console.log('📞 Twilio Device: Incoming connection received');
+                        console.log('   From:', conn.parameters.From);
+                        
+                        // Auto-accept - the user already clicked Answer in the UI
+                        conn.accept();
+                        this.activeConnection = conn;
+                        
+                        console.log('📞 Connection ACCEPTED - voice connected!');
+                        
+                        // Notify UI
+                        if (this.onConnectionAccepted) {
+                            this.onConnectionAccepted(conn);
+                        }
+                        
+                        // Handle disconnect
+                        conn.on('disconnect', () => {
+                            console.log('📞 Incoming connection DISCONNECTED');
+                            this.activeConnection = null;
+                            if (this.onConnectionDisconnected) {
+                                this.onConnectionDisconnected();
+                            }
+                        });
+                        
+                        conn.on('error', (error) => {
+                            console.error('📞 Connection error:', error.message);
+                            this.activeConnection = null;
+                            if (this.onConnectionDisconnected) {
+                                this.onConnectionDisconnected();
+                            }
+                        });
+                    });
+                    
+                    // Device offline/token expired
+                    Twilio.Device.offline((device) => {
+                        console.log('📞 Twilio Device offline - refreshing token...');
+                        this.isReady = false;
+                        // Auto-refresh token after short delay
+                        setTimeout(() => this.refreshToken(), 3000);
+                    });
+                    
+                    // Refresh token every 50 minutes (token expires in 60)
+                    this.tokenRefreshTimer = setInterval(() => this.refreshToken(), 50 * 60 * 1000);
+                    
+                    console.log('📞 Twilio Voice Device initializing for:', data.identity);
+                    return true;
+                    
+                } catch (err) {
+                    console.error('📞 Voice Device init error:', err);
+                    return false;
+                }
+            },
+            
+            async refreshToken() {
+                if (!this.identity) return;
+                try {
+                    const response = await fetch(`${BACKEND_URL}/api/voice-token`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ identity: this.identity })
+                    });
+                    const data = await response.json();
+                    if (data.success && Twilio.Device) {
+                        Twilio.Device.setup(data.token);
+                        console.log('📞 Voice token refreshed');
+                    }
+                } catch (err) {
+                    console.error('📞 Token refresh error:', err);
+                }
+            },
+            
+            hangup() {
+                if (this.activeConnection) {
+                    this.activeConnection.disconnect();
+                    this.activeConnection = null;
+                }
+            },
+            
+            mute(muted) {
+                if (this.activeConnection) {
+                    this.activeConnection.mute(muted);
+                }
+            },
+            
+            isMuted() {
+                return this.activeConnection ? this.activeConnection.isMuted() : false;
+            },
+            
+            destroy() {
+                if (this.tokenRefreshTimer) {
+                    clearInterval(this.tokenRefreshTimer);
+                    this.tokenRefreshTimer = null;
+                }
+                this.hangup();
+                if (typeof Twilio !== 'undefined' && Twilio.Device) {
+                    try { Twilio.Device.destroy(); } catch(e) {}
+                }
+                this.isReady = false;
+                this.identity = null;
+                this.onConnectionAccepted = null;
+                this.onConnectionDisconnected = null;
+                console.log('📞 Twilio Voice Device destroyed');
+            }
+        };
+
         // --- WEBSOCKET MANAGER FOR REAL-TIME UPDATES ---
         const createWebSocketManager = () => {
             let ws = null;
@@ -2806,6 +2967,12 @@
             const [isAnsweringCall, setIsAnsweringCall] = useState(false);
             const incomingCallAudioRef = useRef(null);
             
+            // Active incoming voice call state (after answering)
+            const [activeIncomingVoice, setActiveIncomingVoice] = useState(null);
+            const [incomingCallDuration, setIncomingCallDuration] = useState(0);
+            const [isIncomingMuted, setIsIncomingMuted] = useState(false);
+            const incomingCallTimerRef = useRef(null);
+            
             // Noise Cancellation state - starts enabled
             const [isNoiseCancelEnabled, setIsNoiseCancelEnabled] = useState(true);
             
@@ -2962,15 +3129,29 @@
                 wsManager.setIncomingCallStatusHandler((data) => {
                     console.log('📞 Incoming call status update:', data);
                     
-                    // Stop ringtone
+                    // Stop ringtone on any terminal status
                     if (incomingCallAudioRef.current) {
                         incomingCallAudioRef.current.pause();
                         incomingCallAudioRef.current = null;
                     }
                     
-                    if (data.status === 'answered' || data.status === 'rejected' || data.status === 'missed' || data.status === 'completed' || data.status === 'canceled') {
+                    // For 'answered' status - don't clear the UI, we need it for connected state
+                    // The voice connection handlers will manage the UI from here
+                    if (data.status === 'answered') {
+                        setIsAnsweringCall(false);
+                        return; // Keep incomingCall for connected UI
+                    }
+                    
+                    if (data.status === 'rejected' || data.status === 'missed' || data.status === 'completed' || data.status === 'canceled') {
                         setIncomingCall(null);
                         setIsAnsweringCall(false);
+                        setActiveIncomingVoice(null);
+                        
+                        // Stop incoming call timer
+                        if (incomingCallTimerRef.current) {
+                            clearInterval(incomingCallTimerRef.current);
+                            incomingCallTimerRef.current = null;
+                        }
                         
                         if (data.status === 'missed') {
                             addToast(`Missed call from ${data.callerName}`, 'warning');
@@ -2981,11 +3162,49 @@
                 // Cleanup on unmount
                 return () => {
                     wsManager.disconnect();
+                    twilioVoiceManager.destroy();
                     if (incomingCallAudioRef.current) {
                         incomingCallAudioRef.current.pause();
                     }
+                    if (incomingCallTimerRef.current) {
+                        clearInterval(incomingCallTimerRef.current);
+                    }
                 };
             }, []);
+            
+            // Initialize Twilio Voice Device for incoming calls (separate effect to avoid deps issues)
+            useEffect(() => {
+                // Set up callbacks for voice connection
+                twilioVoiceManager.onConnectionAccepted = (conn) => {
+                    console.log('📞 Voice connection ACCEPTED in UI');
+                    setActiveIncomingVoice({ connected: true, startTime: Date.now() });
+                    setIncomingCallDuration(0);
+                    setIsIncomingMuted(false);
+                    
+                    // Start duration timer
+                    incomingCallTimerRef.current = setInterval(() => {
+                        setIncomingCallDuration(prev => prev + 1);
+                    }, 1000);
+                };
+                
+                twilioVoiceManager.onConnectionDisconnected = () => {
+                    console.log('📞 Voice connection DISCONNECTED in UI');
+                    // Stop timer
+                    if (incomingCallTimerRef.current) {
+                        clearInterval(incomingCallTimerRef.current);
+                        incomingCallTimerRef.current = null;
+                    }
+                    setActiveIncomingVoice(null);
+                    setIncomingCallDuration(0);
+                    setIsIncomingMuted(false);
+                    setIncomingCall(null);
+                    setIsAnsweringCall(false);
+                    addToast('📞 Incoming call ended', 'info');
+                };
+                
+                // Initialize voice device with user identity
+                twilioVoiceManager.init(user.name);
+            }, [user.name]);
 
             // --- Call Lifecycle Management ---
             const stopTimer = useCallback(() => {
@@ -3230,17 +3449,28 @@
                     const data = await response.json();
                     
                     if (data.success) {
-                        addToast(`Call answered! Connected to ${incomingCall.callerName}`, 'success');
-                        setIncomingCall(null);
+                        addToast(`Connecting to ${incomingCall.callerName}...`, 'success');
+                        // Don't clear incomingCall yet - keep it for Connected UI
+                        // The Twilio Device will fire onConnectionAccepted which sets activeIncomingVoice
+                        // If voice device isn't available, clear after a timeout
+                        if (!twilioVoiceManager.isReady) {
+                            // No voice device - just clear the UI after a delay
+                            setTimeout(() => {
+                                setIncomingCall(null);
+                                setIsAnsweringCall(false);
+                            }, 2000);
+                        }
+                        // If voice device IS ready, the modal will transition to Connected state
+                        // via onConnectionAccepted callback
                     } else {
                         addToast(data.error || 'Failed to answer call', 'error');
+                        setIsAnsweringCall(false);
                     }
                 } catch (error) {
                     console.error('Error answering call:', error);
                     addToast('Failed to answer call', 'error');
+                    setIsAnsweringCall(false);
                 }
-                
-                setIsAnsweringCall(false);
             }, [incomingCall, user.name, addToast]);
             
             const handleRejectIncomingCall = useCallback(async (reason) => {
@@ -3275,6 +3505,28 @@
                     addToast('Failed to decline call', 'error');
                 }
             }, [incomingCall, addToast]);
+            
+            // Hangup active incoming voice call
+            const handleHangupIncomingCall = useCallback(() => {
+                twilioVoiceManager.hangup();
+                if (incomingCallTimerRef.current) {
+                    clearInterval(incomingCallTimerRef.current);
+                    incomingCallTimerRef.current = null;
+                }
+                setActiveIncomingVoice(null);
+                setIncomingCallDuration(0);
+                setIsIncomingMuted(false);
+                setIncomingCall(null);
+                setIsAnsweringCall(false);
+                addToast('📞 Call ended', 'info');
+            }, [addToast]);
+            
+            // Toggle mute on active incoming voice call
+            const handleToggleIncomingMute = useCallback(() => {
+                const newMuted = !isIncomingMuted;
+                twilioVoiceManager.mute(newMuted);
+                setIsIncomingMuted(newMuted);
+            }, [isIncomingMuted]);
 
             const initiateCall = useCallback(async (student) => {
                 if (!student || callStateRef.current.status !== 'idle') {
@@ -3610,6 +3862,11 @@
                             onReject={handleRejectIncomingCall}
                             isAnswering={isAnsweringCall}
                             user={user}
+                            isConnected={!!activeIncomingVoice}
+                            callDuration={incomingCallDuration}
+                            isMuted={isIncomingMuted}
+                            onToggleMute={handleToggleIncomingMute}
+                            onHangup={handleHangupIncomingCall}
                         />
                     )}
                 </div>
@@ -3620,15 +3877,16 @@
         // --- Sub-components for Dashboard ---
 
         // Incoming Call Modal Component
-        const IncomingCallModal = ({ call, onAnswer, onReject, isAnswering, user }) => {
+        const IncomingCallModal = ({ call, onAnswer, onReject, isAnswering, user, isConnected, callDuration, isMuted, onToggleMute, onHangup }) => {
             const [elapsedTime, setElapsedTime] = useState(0);
             
             useEffect(() => {
+                if (isConnected) return; // Don't count ringing time when connected
                 const interval = setInterval(() => {
                     setElapsedTime(Math.floor((Date.now() - call.startTime) / 1000));
                 }, 1000);
                 return () => clearInterval(interval);
-            }, [call.startTime]);
+            }, [call.startTime, isConnected]);
             
             const formatTime = (seconds) => {
                 const mins = Math.floor(seconds / 60);
@@ -3641,15 +3899,25 @@
                     <div className="fixed inset-0 bg-black bg-opacity-50 z-50 animate-fade-in"></div>
                     <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
                         <div className="bg-white rounded-3xl shadow-2xl w-full max-w-sm overflow-hidden animate-fade-in">
-                            {/* Green Header */}
-                            <div className="bg-gradient-to-r from-green-500 to-emerald-500 p-6 text-center text-white">
+                            {/* Header - Green for ringing, Blue for connected */}
+                            <div className={`p-6 text-center text-white ${isConnected 
+                                ? 'bg-gradient-to-r from-blue-500 to-indigo-500' 
+                                : 'bg-gradient-to-r from-green-500 to-emerald-500'}`}>
                                 <div className="flex justify-center mb-4">
-                                    <div className="w-20 h-20 bg-white/20 rounded-full flex items-center justify-center animate-pulse">
+                                    <div className={`w-20 h-20 bg-white/20 rounded-full flex items-center justify-center ${isConnected ? '' : 'animate-pulse'}`}>
                                         <Icons.Phone className="w-10 h-10 text-white" />
                                     </div>
                                 </div>
-                                <h2 className="text-2xl font-bold mb-1">Incoming Call</h2>
-                                <p className="text-white/80 text-sm">Ringing for {formatTime(elapsedTime)}</p>
+                                <h2 className="text-2xl font-bold mb-1">
+                                    {isConnected ? 'Call Connected' : isAnswering ? 'Connecting...' : 'Incoming Call'}
+                                </h2>
+                                <p className="text-white/80 text-sm">
+                                    {isConnected 
+                                        ? `Duration: ${formatTime(callDuration)}` 
+                                        : isAnswering 
+                                            ? 'Please wait...' 
+                                            : `Ringing for ${formatTime(elapsedTime)}`}
+                                </p>
                             </div>
                             
                             {/* Caller Info */}
@@ -3663,31 +3931,63 @@
                                 )}
                                 <p className="text-slate-400 text-sm">
                                     {call.studentId ? '📚 Student' : '👤 Unknown Caller'}
+                                    {isConnected && <span className="ml-2 text-green-500 font-semibold">● Live</span>}
                                 </p>
                             </div>
                             
                             {/* Action Buttons */}
-                            <div className="p-6 pt-0 flex gap-4">
-                                <button
-                                    onClick={() => onReject()}
-                                    disabled={isAnswering}
-                                    className="flex-1 py-4 bg-red-500 text-white font-bold rounded-2xl hover:bg-red-600 transition-colors flex items-center justify-center gap-2 disabled:opacity-50"
-                                >
-                                    <Icons.Phone className="w-6 h-6" style={{ transform: 'rotate(135deg)' }} />
-                                    <span>Decline</span>
-                                </button>
-                                <button
-                                    onClick={onAnswer}
-                                    disabled={isAnswering}
-                                    className="flex-1 py-4 bg-green-500 text-white font-bold rounded-2xl hover:bg-green-600 transition-colors flex items-center justify-center gap-2 disabled:opacity-50"
-                                >
-                                    {isAnswering ? (
-                                        <div className="w-6 h-6 border-2 border-white border-t-transparent rounded-full animate-spin"></div>
-                                    ) : (
-                                        <Icons.Phone className="w-6 h-6" />
-                                    )}
-                                    <span>{isAnswering ? 'Connecting...' : 'Answer'}</span>
-                                </button>
+                            <div className="p-6 pt-0">
+                                {isConnected ? (
+                                    /* Connected state - Mute + Hangup */
+                                    <div className="flex gap-4">
+                                        <button
+                                            onClick={onToggleMute}
+                                            className={`flex-1 py-4 font-bold rounded-2xl transition-colors flex items-center justify-center gap-2 ${
+                                                isMuted 
+                                                    ? 'bg-amber-500 text-white hover:bg-amber-600' 
+                                                    : 'bg-slate-200 text-slate-800 hover:bg-slate-300'
+                                            }`}
+                                        >
+                                            {isMuted ? (
+                                                <svg xmlns="http://www.w3.org/2000/svg" className="w-6 h-6" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}><path strokeLinecap="round" strokeLinejoin="round" d="M5.586 15H4a1 1 0 01-1-1v-4a1 1 0 011-1h1.586l4.707-4.707C10.923 3.663 12 4.109 12 5v14c0 .891-1.077 1.337-1.707.707L5.586 15z" /><path strokeLinecap="round" strokeLinejoin="round" d="M17 14l2-2m0 0l2-2m-2 2l-2-2m2 2l2 2" /></svg>
+                                            ) : (
+                                                <svg xmlns="http://www.w3.org/2000/svg" className="w-6 h-6" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}><path strokeLinecap="round" strokeLinejoin="round" d="M19 11a7 7 0 01-7 7m0 0a7 7 0 01-7-7m7 7v4m0 0H8m4 0h4m-4-8a3 3 0 01-3-3V5a3 3 0 116 0v6a3 3 0 01-3 3z" /></svg>
+                                            )}
+                                            <span>{isMuted ? 'Unmute' : 'Mute'}</span>
+                                        </button>
+                                        <button
+                                            onClick={onHangup}
+                                            className="flex-1 py-4 bg-red-500 text-white font-bold rounded-2xl hover:bg-red-600 transition-colors flex items-center justify-center gap-2 shadow-lg shadow-red-500/30"
+                                        >
+                                            <Icons.Phone className="w-6 h-6" style={{ transform: 'rotate(135deg)' }} />
+                                            <span>End Call</span>
+                                        </button>
+                                    </div>
+                                ) : (
+                                    /* Ringing state - Decline + Answer */
+                                    <div className="flex gap-4">
+                                        <button
+                                            onClick={() => onReject()}
+                                            disabled={isAnswering}
+                                            className="flex-1 py-4 bg-red-500 text-white font-bold rounded-2xl hover:bg-red-600 transition-colors flex items-center justify-center gap-2 disabled:opacity-50"
+                                        >
+                                            <Icons.Phone className="w-6 h-6" style={{ transform: 'rotate(135deg)' }} />
+                                            <span>Decline</span>
+                                        </button>
+                                        <button
+                                            onClick={onAnswer}
+                                            disabled={isAnswering}
+                                            className="flex-1 py-4 bg-green-500 text-white font-bold rounded-2xl hover:bg-green-600 transition-colors flex items-center justify-center gap-2 disabled:opacity-50"
+                                        >
+                                            {isAnswering ? (
+                                                <div className="w-6 h-6 border-2 border-white border-t-transparent rounded-full animate-spin"></div>
+                                            ) : (
+                                                <Icons.Phone className="w-6 h-6" />
+                                            )}
+                                            <span>{isAnswering ? 'Connecting...' : 'Answer'}</span>
+                                        </button>
+                                    </div>
+                                )}
                             </div>
                         </div>
                     </div>

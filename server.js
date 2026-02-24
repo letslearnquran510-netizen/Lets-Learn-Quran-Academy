@@ -1458,6 +1458,54 @@ const AccessToken = twilio.jwt.AccessToken;
 const VideoGrant = AccessToken.VideoGrant;
 const VoiceGrant = AccessToken.VoiceGrant;
 
+// TwiML App SID - will be auto-created/fetched on startup
+let twimlAppSid = null;
+
+// Auto-create or fetch TwiML App for voice client
+async function ensureTwimlApp() {
+    if (!twilioClient || !config.publicUrl || config.publicUrl === 'http://localhost:3000') return;
+    
+    try {
+        // Check if we already have one
+        const apps = await twilioClient.applications.list({ friendlyName: 'Quran Academy Voice App', limit: 1 });
+        
+        if (apps.length > 0) {
+            twimlAppSid = apps[0].sid;
+            // Update the voice URL in case server URL changed
+            await twilioClient.applications(twimlAppSid).update({
+                voiceUrl: `${config.publicUrl}/twiml/client-voice`,
+                voiceMethod: 'POST'
+            });
+            console.log('📞 TwiML App found and updated:', twimlAppSid);
+        } else {
+            // Create new TwiML App
+            const app = await twilioClient.applications.create({
+                friendlyName: 'Quran Academy Voice App',
+                voiceUrl: `${config.publicUrl}/twiml/client-voice`,
+                voiceMethod: 'POST'
+            });
+            twimlAppSid = app.sid;
+            console.log('📞 TwiML App created:', twimlAppSid);
+        }
+    } catch (err) {
+        console.log('⚠️ TwiML App setup skipped:', err.message);
+    }
+}
+
+// TwiML endpoint for outbound calls from browser Client
+app.post('/twiml/client-voice', (req, res) => {
+    const { To } = req.body;
+    console.log('📞 Client voice TwiML requested, To:', To);
+    
+    const twiml = `<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+    <Say voice="alice">No outbound number specified.</Say>
+</Response>`;
+    
+    res.type('text/xml');
+    res.send(twiml);
+});
+
 // Generate a unique room name
 function generateRoomName() {
     return 'quran-room-' + Date.now() + '-' + Math.random().toString(36).substring(2, 8);
@@ -1502,10 +1550,16 @@ function generateVoiceToken(identity) {
         { identity: identity, ttl: 3600 } // 1 hour expiry
     );
     
-    const voiceGrant = new VoiceGrant({
+    const voiceGrantOptions = {
         incomingAllow: true
-    });
+    };
     
+    // CRITICAL: Must include TwiML App SID for Device to register
+    if (twimlAppSid) {
+        voiceGrantOptions.outgoingApplicationSid = twimlAppSid;
+    }
+    
+    const voiceGrant = new VoiceGrant(voiceGrantOptions);
     token.addGrant(voiceGrant);
     return token.toJwt();
 }
@@ -1522,6 +1576,13 @@ app.post('/api/voice-token', (req, res) => {
         return res.status(500).json({ 
             success: false, 
             error: 'Voice not configured. Add TWILIO_API_KEY_SID and TWILIO_API_KEY_SECRET.' 
+        });
+    }
+    
+    if (!twimlAppSid) {
+        return res.status(500).json({ 
+            success: false, 
+            error: 'Voice not ready. TwiML App not yet initialized.' 
         });
     }
     
@@ -2817,6 +2878,9 @@ server.listen(PORT, async () => {
         } catch (warmupErr) {
             console.log('⚠️ Twilio warmup skipped:', warmupErr.message);
         }
+        
+        // Auto-configure TwiML App for voice client (MUST happen before phone config)
+        await ensureTwimlApp();
         
         // Auto-configure Twilio phone number for incoming calls
         if (config.publicUrl && config.publicUrl !== 'http://localhost:3000') {

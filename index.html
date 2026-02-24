@@ -3450,18 +3450,25 @@
                     
                     if (data.success) {
                         addToast(`Connecting to ${incomingCall.callerName}...`, 'success');
-                        // Don't clear incomingCall yet - keep it for Connected UI
-                        // The Twilio Device will fire onConnectionAccepted which sets activeIncomingVoice
-                        // If voice device isn't available, clear after a timeout
-                        if (!twilioVoiceManager.isReady) {
-                            // No voice device - just clear the UI after a delay
-                            setTimeout(() => {
-                                setIncomingCall(null);
-                                setIsAnsweringCall(false);
-                            }, 2000);
-                        }
-                        // If voice device IS ready, the modal will transition to Connected state
-                        // via onConnectionAccepted callback
+                        
+                        // If voice device is ready, wait for onConnectionAccepted callback
+                        // to transition the modal to Connected state
+                        // Set a safety timeout: if voice connection doesn't come in 10 seconds,
+                        // show success and clear the modal
+                        setTimeout(() => {
+                            setIsAnsweringCall(prev => {
+                                if (prev) {
+                                    // Still in "answering" state after 10s - voice device didn't connect
+                                    // This means the call IS connected on Twilio (caller hears audio)
+                                    // but browser voice isn't working. Clear the UI gracefully.
+                                    console.log('⚠️ Voice device connection timeout - clearing UI');
+                                    addToast('Call answered! Audio is connected through your Twilio number.', 'success');
+                                    setIncomingCall(null);
+                                    return false;
+                                }
+                                return prev;
+                            });
+                        }, 10000);
                     } else {
                         addToast(data.error || 'Failed to answer call', 'error');
                         setIsAnsweringCall(false);

@@ -1492,16 +1492,56 @@ async function ensureTwimlApp() {
     }
 }
 
-// TwiML endpoint for outbound calls from browser Client
+// TwiML endpoint - handles browser Client voice requests
+// When admin clicks Answer, device.connect() hits this URL with conference params
 app.post('/twiml/client-voice', (req, res) => {
-    const { To } = req.body;
-    console.log('📞 Client voice TwiML requested, To:', To);
+    const { action, conference } = req.body;
+    console.log('📞 TwiML App request - action:', action, 'conference:', conference);
     
+    if (action === 'join-conference' && conference) {
+        // Admin joining a conference to answer incoming call
+        // Sanitize conference name (only allow alphanumeric and underscore)
+        const safeConf = conference.replace(/[^a-zA-Z0-9_]/g, '');
+        
+        const twiml = `<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+    <Dial>
+        <Conference startConferenceOnEnter="true" endConferenceOnExit="true" 
+                    beep="false" maxParticipants="2"
+                    record="record-from-start"
+                    recordingStatusCallback="${config.publicUrl}/webhooks/recording-status"
+                    recordingStatusCallbackEvent="completed">
+            ${safeConf}
+        </Conference>
+    </Dial>
+</Response>`;
+        
+        console.log('   📤 TwiML: Join conference', safeConf);
+        res.type('text/xml');
+        res.send(twiml);
+    } else {
+        // Default fallback
+        const twiml = `<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+    <Say voice="alice">No action specified.</Say>
+</Response>`;
+        res.type('text/xml');
+        res.send(twiml);
+    }
+});
+
+// Hold music endpoint - loops hold message for waiting callers
+app.post('/twiml/hold-music', (req, res) => {
     const twiml = `<?xml version="1.0" encoding="UTF-8"?>
 <Response>
-    <Say voice="alice">No outbound number specified.</Say>
+    <Say voice="alice">Your call is important to us. A teacher will be with you shortly. Jazak Allahu Khairan.</Say>
+    <Play>https://api.twilio.com/cowbell.mp3</Play>
+    <Pause length="3"/>
+    <Say voice="alice">Please continue to hold. A teacher will answer your call soon.</Say>
+    <Play>https://api.twilio.com/cowbell.mp3</Play>
+    <Pause length="5"/>
+    <Redirect>${config.publicUrl}/twiml/hold-music</Redirect>
 </Response>`;
-    
     res.type('text/xml');
     res.send(twiml);
 });
@@ -2388,12 +2428,13 @@ app.post('/webhooks/call-status', (req, res) => {
 // ---------------------------------------------------------
 // INCOMING VOICE CALL WEBHOOK  
 // ---------------------------------------------------------
-// CORRECT FLOW (per Twilio official quickstart):
+// CONFERENCE-BASED APPROACH (most reliable):
 // 1. Caller dials number → Twilio hits this webhook
-// 2. We return TwiML with <Dial><Client>identity</Client></Dial>
-// 3. Twilio routes call to browser Device registered as that identity
-// 4. Browser Device fires 'incoming' event → user clicks Accept → call.accept() → audio connected!
-// NO hold music, NO API call to update, NO race conditions
+// 2. We put caller in a Conference room with hold music
+// 3. We broadcast via WebSocket to app
+// 4. Admin clicks Answer → browser uses device.connect() to join same Conference
+// 5. Both in Conference → audio connected!
+// device.connect() works WITHOUT device.register() - this is the key!
 
 app.post('/webhooks/voice-incoming', async (req, res) => {
     const { CallSid, From, To, CallStatus, Direction } = req.body;
@@ -2406,6 +2447,7 @@ app.post('/webhooks/voice-incoming', async (req, res) => {
     console.log('='.repeat(60));
     
     // STEP 1: Store call in Map
+    const confName = `inbound_${CallSid}`;
     const incomingCallData = {
         callSid: CallSid,
         from: From,
@@ -2415,29 +2457,32 @@ app.post('/webhooks/voice-incoming', async (req, res) => {
         status: 'ringing',
         startTime: Date.now(),
         answeredBy: null,
-        answeredTime: null
+        answeredTime: null,
+        conferenceName: confName
     };
     inboundCalls.set(CallSid, incomingCallData);
     console.log('   ✅ Call stored in memory map');
     
-    // STEP 2: Return TwiML that dials the browser Client DIRECTLY
-    // Caller hears greeting, then ringing while Twilio connects to browser Device
-    // If no answer in 45s, <Dial> completes and action URL handles it
-    const clientIdentity = 'Administrator';
-    
+    // STEP 2: Put caller in Conference with hold music
+    // startConferenceOnEnter="false" → caller hears hold music until admin joins
+    // endConferenceOnExit="true" → if caller hangs up, conference ends
     const twiml = `<?xml version="1.0" encoding="UTF-8"?>
 <Response>
     <Say voice="alice">Assalam Alaikum. Please wait while we connect you to a teacher.</Say>
-    <Dial timeout="45" record="record-from-answer-dual" recordingStatusCallback="${config.publicUrl}/webhooks/recording-status" recordingStatusCallbackEvent="completed" action="${config.publicUrl}/webhooks/voice-incoming-dial-complete">
-        <Client>${clientIdentity}</Client>
+    <Dial action="${config.publicUrl}/webhooks/voice-incoming-dial-complete">
+        <Conference startConferenceOnEnter="false" endConferenceOnExit="true"
+                    waitUrl="${config.publicUrl}/twiml/hold-music" waitUrlMethod="POST"
+                    beep="false" maxParticipants="2">
+            ${confName}
+        </Conference>
     </Dial>
 </Response>`;
     
-    console.log('   📤 Sending TwiML - dialing Client:', clientIdentity);
+    console.log('   📤 Sending TwiML - Conference:', confName);
     res.type('text/xml');
     res.send(twiml);
     
-    // STEP 3: BACKGROUND - Look up caller name and broadcast to app via WebSocket
+    // STEP 3: BACKGROUND - Look up caller name and broadcast
     try {
         let callerName = 'Unknown Caller';
         let callerStudent = null;
@@ -2464,7 +2509,6 @@ app.post('/webhooks/voice-incoming', async (req, res) => {
         incomingCallData.callerName = callerName;
         incomingCallData.studentId = callerStudent?.id || callerStudent?._id || null;
         
-        // Broadcast incoming call to all connected clients (for UI notification)
         broadcastIncomingCall(incomingCallData);
         console.log('   📢 Incoming call broadcast sent to app');
         
@@ -2472,6 +2516,25 @@ app.post('/webhooks/voice-incoming', async (req, res) => {
         console.error('❌ Error in incoming call background processing:', error);
         broadcastIncomingCall(incomingCallData);
     }
+    
+    // STEP 4: Missed call safety timer (90 seconds)
+    setTimeout(async () => {
+        const call = inboundCalls.get(CallSid);
+        if (call && call.status === 'ringing') {
+            console.log('   ⏰ Missed call timeout for:', CallSid);
+            try {
+                await twilioClient.calls(CallSid).update({
+                    twiml: '<Response><Say voice="alice">We are sorry, no one is available to take your call right now. Please try again later. Jazak Allahu Khairan.</Say><Hangup/></Response>'
+                });
+            } catch (e) {
+                console.log('   ⚠️ Could not end timed-out call:', e.message);
+            }
+            call.status = 'missed';
+            broadcastIncomingCallStatus(CallSid, 'missed', { callerName: call.callerName, from: call.from });
+            saveInboundCallHistory(call, 'Missed', 0);
+            inboundCalls.delete(CallSid);
+        }
+    }, 90000);
 });
 
 // Webhook for when <Dial> completes (no answer, busy, rejected)
@@ -2605,11 +2668,10 @@ app.post('/api/inbound-call/answer', async (req, res) => {
         incomingCall.answeredBy = answeredBy;
         incomingCall.answeredTime = Date.now();
     } else {
-        // Create entry if missing (e.g. after server restart)
         incomingCall = {
             callSid, from: 'Unknown', to: '', callerName: 'Caller',
             status: 'answered', answeredBy, answeredTime: Date.now(),
-            startTime: Date.now()
+            startTime: Date.now(), conferenceName: `inbound_${callSid}`
         };
         inboundCalls.set(callSid, incomingCall);
     }
@@ -2621,11 +2683,12 @@ app.post('/api/inbound-call/answer', async (req, res) => {
         from: incomingCall.from
     });
     
-    console.log('   ✅ Call answer tracked successfully');
+    console.log('   ✅ Call answer tracked - audio connection handled by browser Conference join');
     
     res.json({ 
         success: true, 
         message: 'Call answered',
+        conferenceName: incomingCall.conferenceName || `inbound_${callSid}`,
         call: incomingCall
     });
 });

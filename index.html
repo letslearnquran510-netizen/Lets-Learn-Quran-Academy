@@ -2031,21 +2031,18 @@
             }
         };
 
-        // --- TWILIO VOICE DEVICE MANAGER (SDK 2.x) ---
-        // Handles browser-based voice for receiving incoming calls
-        // SDK 2.x uses instance-based API: new Twilio.Device(token) + device.register()
+        // --- TWILIO VOICE DEVICE MANAGER (Conference-based) ---
+        // Uses device.connect() to join a Conference - NO device.register() needed!
+        // This is the most reliable approach for browser-based call answering.
         const twilioVoiceManager = {
             device: null,           // Twilio.Device instance
-            activeCall: null,       // Current active Call object
-            pendingCall: null,      // Incoming call waiting to be accepted
+            activeCall: null,       // Active Call from device.connect()
             identity: null,
             isReady: false,
-            tokenRefreshTimer: null,
             initAttempts: 0,
             
             // Callbacks set by React component
-            onIncomingCall: null,       // called when Device receives incoming call
-            onCallAccepted: null,       // called when call audio connects
+            onCallAccepted: null,       // called when conference call audio connects
             onCallDisconnected: null,   // called when call ends
             
             async init(identity) {
@@ -2070,10 +2067,10 @@
                     
                     if (!data.success) {
                         console.log('⚠️ Voice token not available:', data.error);
-                        // Retry if server not ready (max 5 times, every 10s)
+                        // Retry if server not ready (max 5 times, every 15s)
                         if (this.initAttempts < 6) {
-                            console.log(`   Retrying in 10s (attempt ${this.initAttempts}/5)...`);
-                            setTimeout(() => this.init(identity), 10000);
+                            console.log(`   Retrying in 15s (attempt ${this.initAttempts}/5)...`);
+                            setTimeout(() => this.init(identity), 15000);
                         }
                         return false;
                     }
@@ -2083,141 +2080,100 @@
                         try { this.device.destroy(); } catch(e) {}
                     }
                     
-                    // === SDK 2.x: Create Device instance ===
+                    // === Create Device instance (SDK 2.x) ===
+                    // NO device.register() needed! device.connect() works without it.
                     this.device = new Twilio.Device(data.token, {
                         codecPreferences: ['opus', 'pcmu'],
-                        logLevel: 'warn',  // reduce noise, set to 'debug' to troubleshoot
-                        closeProtection: false,
-                        allowIncomingWhileBusy: false
+                        logLevel: 'warn'
                     });
                     
-                    // === SDK 2.x: Event handlers ===
-                    
-                    // Device registered successfully with Twilio
-                    this.device.on('registered', () => {
-                        console.log('📞 ✅ Twilio Voice Device REGISTERED - identity:', data.identity);
-                        this.isReady = true;
-                    });
-                    
-                    // Device is registering
-                    this.device.on('registering', () => {
-                        console.log('📞 Twilio Voice Device registering...');
-                    });
-                    
-                    // Device unregistered
-                    this.device.on('unregistered', () => {
-                        console.log('📞 Twilio Voice Device unregistered');
-                        this.isReady = false;
-                    });
-                    
-                    // Device error
-                    this.device.on('error', (error) => {
-                        console.error('📞 Twilio Voice Device error:', error.message || error);
-                    });
-                    
-                    // === INCOMING CALL EVENT ===
-                    // Fires when Twilio routes a call via <Dial><Client>identity</Client></Dial>
-                    this.device.on('incoming', (call) => {
-                        console.log('📞 ✅ INCOMING CALL on Device!');
-                        console.log('   From:', call.parameters?.From);
-                        console.log('   CallSid:', call.parameters?.CallSid);
-                        
-                        // Store the call - DON'T accept yet, wait for user to click Answer
-                        this.pendingCall = call;
-                        
-                        // Set up call event handlers
-                        call.on('accept', () => {
-                            console.log('📞 ✅ Call ACCEPTED - audio connected!');
-                            this.activeCall = call;
-                            this.pendingCall = null;
-                            if (this.onCallAccepted) {
-                                this.onCallAccepted(call);
-                            }
-                        });
-                        
-                        call.on('disconnect', () => {
-                            console.log('📞 Call DISCONNECTED');
-                            this.activeCall = null;
-                            this.pendingCall = null;
-                            if (this.onCallDisconnected) {
-                                this.onCallDisconnected();
-                            }
-                        });
-                        
-                        call.on('cancel', () => {
-                            console.log('📞 Call CANCELED (caller hung up before answer)');
-                            this.pendingCall = null;
-                            this.activeCall = null;
-                            if (this.onCallDisconnected) {
-                                this.onCallDisconnected();
-                            }
-                        });
-                        
-                        call.on('reject', () => {
-                            console.log('📞 Call REJECTED');
-                            this.pendingCall = null;
-                        });
-                        
-                        call.on('error', (error) => {
-                            console.error('📞 Call error:', error.message || error);
-                            this.activeCall = null;
-                            this.pendingCall = null;
-                            if (this.onCallDisconnected) {
-                                this.onCallDisconnected();
-                            }
-                        });
-                        
-                        // Notify UI that incoming call arrived on Device
-                        if (this.onIncomingCall) {
-                            this.onIncomingCall(call);
-                        }
-                    });
-                    
-                    // === Token refresh ===
+                    // Token refresh handler
                     this.device.on('tokenWillExpire', () => {
-                        console.log('📞 Token expiring soon - refreshing...');
+                        console.log('📞 Token expiring - refreshing...');
                         this.refreshToken();
                     });
                     
-                    // === SDK 2.x: Explicit registration ===
-                    // This opens WebSocket to Twilio signaling servers
-                    await this.device.register();
+                    this.device.on('error', (error) => {
+                        console.error('📞 Device error:', error.message || error);
+                    });
                     
-                    console.log('📞 Twilio Voice Device initialized for:', data.identity);
+                    this.isReady = true;
+                    console.log('📞 ✅ Twilio Voice Device READY (conference mode) - identity:', data.identity);
                     return true;
                     
                 } catch (err) {
                     console.error('📞 Voice Device init error:', err);
-                    // Retry on failure
                     if (this.initAttempts < 6) {
-                        console.log(`   Retrying in 15s (attempt ${this.initAttempts}/5)...`);
                         setTimeout(() => this.init(identity), 15000);
                     }
                     return false;
                 }
             },
             
-            // Accept a pending incoming call
-            acceptCall() {
-                if (this.pendingCall) {
-                    console.log('📞 Accepting incoming call via SDK...');
-                    this.pendingCall.accept();
-                    // The 'accept' event handler above will move it to activeCall
-                    return true;
+            // Connect to a conference to answer an incoming call
+            async connectToConference(callSid) {
+                if (!this.device) {
+                    console.error('📞 No device available');
+                    return null;
                 }
-                console.log('⚠️ No pending call to accept');
-                return false;
-            },
-            
-            // Reject a pending incoming call  
-            rejectCall() {
-                if (this.pendingCall) {
-                    console.log('📞 Rejecting incoming call via SDK...');
-                    this.pendingCall.reject();
-                    this.pendingCall = null;
-                    return true;
+                
+                const confName = `inbound_${callSid}`;
+                console.log('📞 Connecting to conference:', confName);
+                
+                try {
+                    // device.connect() triggers TwiML App URL with params
+                    // TwiML App returns <Conference> TwiML to join the same room as the caller
+                    const call = await this.device.connect({
+                        params: {
+                            action: 'join-conference',
+                            conference: confName
+                        }
+                    });
+                    
+                    this.activeCall = call;
+                    
+                    // Call accepted = audio stream established
+                    call.on('accept', () => {
+                        console.log('📞 ✅ Conference JOINED - audio connected!');
+                        if (this.onCallAccepted) {
+                            this.onCallAccepted(call);
+                        }
+                    });
+                    
+                    // Call disconnected
+                    call.on('disconnect', () => {
+                        console.log('📞 Conference call DISCONNECTED');
+                        this.activeCall = null;
+                        if (this.onCallDisconnected) {
+                            this.onCallDisconnected();
+                        }
+                    });
+                    
+                    // Call cancelled (e.g. caller hung up)
+                    call.on('cancel', () => {
+                        console.log('📞 Conference call CANCELED');
+                        this.activeCall = null;
+                        if (this.onCallDisconnected) {
+                            this.onCallDisconnected();
+                        }
+                    });
+                    
+                    // Call error
+                    call.on('error', (error) => {
+                        console.error('📞 Conference call error:', error.message || error);
+                        this.activeCall = null;
+                        if (this.onCallDisconnected) {
+                            this.onCallDisconnected();
+                        }
+                    });
+                    
+                    console.log('📞 Conference connection initiated');
+                    return call;
+                    
+                } catch (err) {
+                    console.error('📞 Connect to conference error:', err);
+                    return null;
                 }
-                return false;
             },
             
             async refreshToken() {
@@ -2230,7 +2186,6 @@
                     });
                     const data = await response.json();
                     if (data.success && this.device) {
-                        // SDK 2.x: updateToken instead of setup
                         this.device.updateToken(data.token);
                         console.log('📞 Voice token refreshed');
                     }
@@ -2244,9 +2199,9 @@
                     this.activeCall.disconnect();
                     this.activeCall = null;
                 }
-                if (this.pendingCall) {
-                    this.pendingCall.reject();
-                    this.pendingCall = null;
+                // Also disconnect all calls on device
+                if (this.device) {
+                    try { this.device.disconnectAll(); } catch(e) {}
                 }
             },
             
@@ -2260,15 +2215,7 @@
                 return this.activeCall ? this.activeCall.isMuted() : false;
             },
             
-            hasPendingCall() {
-                return !!this.pendingCall;
-            },
-            
             destroy() {
-                if (this.tokenRefreshTimer) {
-                    clearInterval(this.tokenRefreshTimer);
-                    this.tokenRefreshTimer = null;
-                }
                 this.hangup();
                 if (this.device) {
                     try { this.device.destroy(); } catch(e) {}
@@ -2276,7 +2223,6 @@
                 }
                 this.isReady = false;
                 this.identity = null;
-                this.onIncomingCall = null;
                 this.onCallAccepted = null;
                 this.onCallDisconnected = null;
                 console.log('📞 Twilio Voice Device destroyed');
@@ -3264,19 +3210,11 @@
                 };
             }, []);
             
-            // Initialize Twilio Voice Device for incoming calls (separate effect to avoid deps issues)
+            // Initialize Twilio Voice Device for answering calls via Conference
             useEffect(() => {
-                // Set up callbacks for voice device
-                
-                // Called when Device receives an incoming call from Twilio
-                // (before user clicks Answer - just stores the call)
-                twilioVoiceManager.onIncomingCall = (call) => {
-                    console.log('📞 Device received incoming call - ready for user to accept');
-                };
-                
-                // Called when call audio actually connects (after user accepts)
+                // Set up callbacks for when conference call connects/disconnects
                 twilioVoiceManager.onCallAccepted = (call) => {
-                    console.log('📞 Voice call ACCEPTED - audio connected in UI');
+                    console.log('📞 ✅ Conference call CONNECTED in UI - audio is live!');
                     setIsAnsweringCall(false);
                     setActiveIncomingVoice({ connected: true, startTime: Date.now() });
                     setIncomingCallDuration(0);
@@ -3288,9 +3226,8 @@
                     }, 1000);
                 };
                 
-                // Called when call ends (disconnect, cancel, error)
                 twilioVoiceManager.onCallDisconnected = () => {
-                    console.log('📞 Voice call DISCONNECTED in UI');
+                    console.log('📞 Conference call ENDED in UI');
                     if (incomingCallTimerRef.current) {
                         clearInterval(incomingCallTimerRef.current);
                         incomingCallTimerRef.current = null;
@@ -3303,7 +3240,7 @@
                     addToast('📞 Incoming call ended', 'info');
                 };
                 
-                // Initialize voice device with user identity
+                // Initialize voice device - just creates Device, NO registration needed
                 twilioVoiceManager.init(user.name);
             }, [user.name]);
 
@@ -3537,44 +3474,49 @@
                     incomingCallAudioRef.current = null;
                 }
                 
-                // STEP 1: Accept the call via Twilio Voice SDK
-                // This is what actually connects the audio!
-                const sdkAccepted = twilioVoiceManager.acceptCall();
-                
-                if (sdkAccepted) {
-                    console.log('📞 Call accepted via SDK - waiting for audio connection...');
-                } else {
-                    console.log('⚠️ No pending call in SDK - call may have been canceled');
+                // Re-init voice device if not ready
+                if (!twilioVoiceManager.isReady) {
+                    console.log('📞 Device not ready, initializing...');
+                    await twilioVoiceManager.init(user.name);
+                    // Small delay to let device settle
+                    await new Promise(r => setTimeout(r, 1000));
                 }
                 
-                // STEP 2: Also notify server for tracking
-                try {
-                    await fetch(`${BACKEND_URL}/api/inbound-call/answer`, {
+                // JOIN THE CONFERENCE via device.connect()
+                // This works WITHOUT device.register()!
+                const call = await twilioVoiceManager.connectToConference(incomingCall.callSid);
+                
+                if (call) {
+                    addToast(`Connecting to ${incomingCall.callerName}...`, 'success');
+                    
+                    // Track the answer on server
+                    fetch(`${BACKEND_URL}/api/inbound-call/answer`, {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json' },
                         body: JSON.stringify({
                             callSid: incomingCall.callSid,
                             answeredBy: user.name
                         })
-                    });
-                } catch (error) {
-                    console.log('⚠️ Answer tracking failed (call still works):', error.message);
-                }
-                
-                // Safety timeout: if SDK didn't connect audio in 15 seconds, clean up
-                setTimeout(() => {
-                    setIsAnsweringCall(prev => {
-                        if (prev) {
-                            console.log('⚠️ Voice connection timeout - cleaning up');
-                            if (!twilioVoiceManager.activeCall) {
-                                addToast('Could not connect audio. Caller may have hung up.', 'warning');
-                                setIncomingCall(null);
+                    }).catch(err => console.log('Answer tracking error:', err.message));
+                    
+                    // Safety timeout
+                    setTimeout(() => {
+                        setIsAnsweringCall(prev => {
+                            if (prev) {
+                                console.log('⚠️ Conference join timeout');
+                                if (!twilioVoiceManager.activeCall) {
+                                    addToast('Could not connect audio. Please try again.', 'error');
+                                    setIncomingCall(null);
+                                }
+                                return false;
                             }
-                            return false;
-                        }
-                        return prev;
-                    });
-                }, 15000);
+                            return prev;
+                        });
+                    }, 15000);
+                } else {
+                    addToast('Failed to connect. Check microphone permissions.', 'error');
+                    setIsAnsweringCall(false);
+                }
             }, [incomingCall, user.name, addToast]);
             
             const handleRejectIncomingCall = useCallback(async (reason) => {
@@ -3586,11 +3528,11 @@
                     incomingCallAudioRef.current = null;
                 }
                 
-                // Reject via SDK first (stops the ringing on Twilio side)
-                twilioVoiceManager.rejectCall();
+                // Disconnect any active call
+                twilioVoiceManager.hangup();
                 
                 try {
-                    const response = await fetch(`${BACKEND_URL}/api/inbound-call/reject`, {
+                    await fetch(`${BACKEND_URL}/api/inbound-call/reject`, {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json' },
                         body: JSON.stringify({
@@ -3598,19 +3540,13 @@
                             reason: reason || 'We are currently unavailable. Please try again later.'
                         })
                     });
-                    
-                    const data = await response.json();
-                    
-                    if (data.success) {
-                        addToast(`Call from ${incomingCall.callerName} declined`, 'info');
-                    } else {
-                        addToast(data.error || 'Failed to decline call', 'error');
-                    }
+                    addToast(`Call from ${incomingCall.callerName} declined`, 'info');
                 } catch (error) {
                     console.error('Error rejecting call:', error);
                     addToast('Failed to decline call', 'error');
                 }
                 setIncomingCall(null);
+                setIsAnsweringCall(false);
             }, [incomingCall, addToast]);
             
             // Hangup active incoming voice call

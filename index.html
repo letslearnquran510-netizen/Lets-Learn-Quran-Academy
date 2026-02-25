@@ -2081,11 +2081,10 @@
                     }
                     
                     // === Create Device instance (SDK 2.x) ===
-                    // NO device.register() needed! device.connect() works without it.
                     this.device = new Twilio.Device(data.token, {
                         codecPreferences: ['opus', 'pcmu'],
-                        logLevel: 'debug',  // TEMPORARY: debug mode to diagnose 53000
-                        enableImprovedSignalingErrorPrecision: true  // Get specific error codes
+                        logLevel: 'warn',
+                        enableImprovedSignalingErrorPrecision: true
                     });
                     
                     // Token refresh handler
@@ -2096,26 +2095,27 @@
                     
                     this.device.on('error', (error) => {
                         console.error('📞 Device error:', error.code, error.message);
-                        if (error.causes) console.error('   Causes:', error.causes);
-                        if (error.solutions) console.error('   Solutions:', error.solutions);
                     });
                     
-                    this.isReady = true;
-                    console.log('📞 ✅ Twilio Voice Device READY (conference mode) - identity:', data.identity);
+                    // IMPORTANT: Register device to open signaling WebSocket
+                    // This is needed so device.connect() works later
+                    this.device.on('registered', () => {
+                        this.isReady = true;
+                        console.log('📞 ✅ Twilio Voice Device REGISTERED and READY - identity:', data.identity);
+                    });
                     
-                    // Debug: decode token to verify grants
-                    try {
-                        const parts = data.token.split('.');
-                        if (parts.length === 3) {
-                            const payload = JSON.parse(atob(parts[1]));
-                            console.log('📞 Token grants:', JSON.stringify(payload.grants));
-                            if (payload.grants && payload.grants.voice && payload.grants.voice.outgoing) {
-                                console.log('📞 ✅ Token has outgoing app SID');
-                            } else {
-                                console.error('📞 ❌ Token MISSING outgoing app SID - device.connect() will fail!');
-                            }
-                        }
-                    } catch(e) { console.log('Token decode error:', e.message); }
+                    this.device.on('registering', () => {
+                        console.log('📞 Twilio Voice Device registering...');
+                    });
+                    
+                    this.device.on('unregistered', () => {
+                        console.log('📞 Twilio Voice Device unregistered');
+                        this.isReady = false;
+                    });
+                    
+                    // Register with Twilio - opens signaling WebSocket
+                    await this.device.register();
+                    console.log('📞 Device registration initiated for:', data.identity);
                     
                     return true;
                     
@@ -2133,6 +2133,20 @@
                 if (!this.device) {
                     console.error('📞 No device available');
                     return null;
+                }
+                
+                // Wait for device to be registered (signaling WebSocket open)
+                if (!this.isReady) {
+                    console.log('📞 Device not registered yet, waiting...');
+                    // Wait up to 5 seconds for registration
+                    for (let i = 0; i < 10; i++) {
+                        await new Promise(r => setTimeout(r, 500));
+                        if (this.isReady) break;
+                    }
+                    if (!this.isReady) {
+                        console.error('📞 Device registration timeout - cannot connect');
+                        return null;
+                    }
                 }
                 
                 const confName = `inbound_${callSid}`;
@@ -2189,9 +2203,9 @@
                     return call;
                     
                 } catch (err) {
-                    console.error('📞 Connect to conference error:', err.code, err.message);
-                    if (err.causes) console.error('   Causes:', err.causes);
-                    if (err.solutions) console.error('   Solutions:', err.solutions);
+                    console.error('📞 Connect to conference error:', err?.code || 'unknown', err?.message || err);
+                    if (err?.causes) console.error('   Causes:', err.causes);
+                    if (err?.solutions) console.error('   Solutions:', err.solutions);
                     return null;
                 }
             },

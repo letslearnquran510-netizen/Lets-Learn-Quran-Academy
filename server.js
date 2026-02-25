@@ -325,6 +325,7 @@ const activeCalls = new Map();
 const recordingsMap = new Map();
 const activeVideoRooms = new Map(); // For tracking active video rooms
 const inboundCalls = new Map(); // For tracking incoming calls waiting to be answered
+const conferenceCallMap = new Map(); // Map conference name → original CallSid (for linking recordings)
 
 // In-memory fallback if MongoDB not connected
 let inMemoryStudents = [];
@@ -2343,6 +2344,70 @@ app.post('/webhooks/recording-status', async (req, res) => {
     res.status(200).send('OK');
 });
 
+// Recording webhook specifically for inbound calls (from <Dial record="...">)
+app.post('/webhooks/inbound-recording-status', async (req, res) => {
+    const { RecordingSid, RecordingUrl, RecordingStatus, RecordingDuration, CallSid } = req.body;
+    
+    console.log('🎙️ INBOUND RECORDING WEBHOOK:', RecordingStatus, 'for call:', CallSid);
+    
+    if (RecordingStatus === 'completed' && RecordingUrl) {
+        const playableUrl = RecordingUrl + '.mp3';
+        
+        // Store in recordings map
+        recordingsMap.set(CallSid, {
+            sid: RecordingSid,
+            url: playableUrl,
+            duration: parseInt(RecordingDuration) || 0,
+            timestamp: Date.now()
+        });
+        
+        // Also check if this is in the inbound calls map
+        const incomingCall = inboundCalls.get(CallSid);
+        if (incomingCall) {
+            incomingCall.recordingUrl = playableUrl;
+            console.log('   🎙️ Recording linked to inbound call:', CallSid);
+        }
+        
+        // Update database
+        if (dbConnected) {
+            try {
+                // Try matching by callSid directly
+                const updated = await CallHistory.findOneAndUpdate(
+                    { callSid: CallSid },
+                    { recordingUrl: playableUrl }
+                );
+                if (updated) {
+                    console.log('   💾 Inbound recording saved to database');
+                } else {
+                    console.log('   ⚠️ No history entry found yet for:', CallSid, '- will retry');
+                    // Retry after 5s in case history hasn't been saved yet
+                    setTimeout(async () => {
+                        try {
+                            await CallHistory.findOneAndUpdate(
+                                { callSid: CallSid },
+                                { recordingUrl: playableUrl }
+                            );
+                            console.log('   💾 Inbound recording saved to database (retry)');
+                        } catch (e) {
+                            console.log('   ⚠️ Retry failed:', e.message);
+                        }
+                    }, 5000);
+                }
+            } catch (err) {
+                console.error('   ❌ Error saving inbound recording:', err.message);
+            }
+        }
+        
+        // Also update in-memory history
+        const memEntry = inMemoryCallHistory.find(h => h.callSid === CallSid);
+        if (memEntry) {
+            memEntry.recordingUrl = playableUrl;
+        }
+    }
+    
+    res.status(200).send('OK');
+});
+
 app.get('/recording/:callSid', async (req, res) => {
     const { callSid } = req.params;
     
@@ -2520,13 +2585,19 @@ app.post('/webhooks/voice-incoming', async (req, res) => {
     inboundCalls.set(CallSid, incomingCallData);
     console.log('   ✅ Call stored in memory map');
     
+    // Store conference → callSid mapping for recording linking
+    conferenceCallMap.set(confName, CallSid);
+    
     // STEP 2: Put caller in Conference with hold music
     // startConferenceOnEnter="false" → caller hears hold music until admin joins
     // endConferenceOnExit="true" → if caller hangs up, conference ends
     const twiml = `<?xml version="1.0" encoding="UTF-8"?>
 <Response>
     <Say voice="alice">Assalam Alaikum. Please wait while we connect you to a teacher.</Say>
-    <Dial action="${config.publicUrl}/webhooks/voice-incoming-dial-complete">
+    <Dial action="${config.publicUrl}/webhooks/voice-incoming-dial-complete"
+          record="record-from-answer-dual"
+          recordingStatusCallback="${config.publicUrl}/webhooks/inbound-recording-status"
+          recordingStatusCallbackEvent="completed">
         <Conference startConferenceOnEnter="false" endConferenceOnExit="true"
                     waitUrl="${config.publicUrl}/twiml/hold-music" waitUrlMethod="POST"
                     beep="false" maxParticipants="2">
@@ -2594,43 +2665,89 @@ app.post('/webhooks/voice-incoming', async (req, res) => {
     }, 90000);
 });
 
-// Webhook for when <Dial> completes (no answer, busy, rejected)
+// Webhook for when <Dial> completes (called for ALL outcomes - answered, no-answer, etc.)
 app.post('/webhooks/voice-incoming-dial-complete', (req, res) => {
-    const { CallSid, DialCallStatus } = req.body;
-    console.log('📞 Dial completed for:', CallSid, 'Status:', DialCallStatus);
+    const { CallSid, DialCallStatus, DialCallDuration, RecordingUrl } = req.body;
+    console.log('📞 Dial completed for:', CallSid, 'Status:', DialCallStatus, 'Duration:', DialCallDuration);
     
     const incomingCall = inboundCalls.get(CallSid);
     
-    // If the dial was not answered (no-answer, busy, canceled, failed)
-    if (DialCallStatus !== 'completed' && DialCallStatus !== 'answered') {
-        // Play a sorry message to the caller
+    if (!incomingCall) {
+        console.log('   ⚠️ No cached incoming call found for:', CallSid);
+        res.type('text/xml');
+        res.send('<?xml version="1.0" encoding="UTF-8"?><Response></Response>');
+        return;
+    }
+    
+    const duration = parseInt(DialCallDuration) || 0;
+    
+    // Calculate duration from answeredTime if not provided by Twilio
+    const calculatedDuration = duration > 0 ? duration : 
+        (incomingCall.answeredTime ? Math.floor((Date.now() - incomingCall.answeredTime) / 1000) : 0);
+    
+    if (DialCallStatus === 'completed' || DialCallStatus === 'answered') {
+        // Call was answered and completed normally
+        console.log('   ✅ Incoming call completed. Duration:', calculatedDuration, 'seconds');
+        
+        // Store recording URL if provided
+        if (RecordingUrl) {
+            incomingCall.recordingUrl = RecordingUrl + '.mp3';
+            console.log('   🎙️ Recording URL:', incomingCall.recordingUrl);
+        }
+        
+        // Save to history
+        saveInboundCallHistory(incomingCall, 'Completed', calculatedDuration);
+        
+        // Broadcast completion
+        broadcastIncomingCallStatus(CallSid, 'completed', {
+            duration: calculatedDuration,
+            callerName: incomingCall.callerName,
+            from: incomingCall.from,
+            answeredBy: incomingCall.answeredBy
+        });
+        
+        // Clean up
+        const confName = incomingCall.conferenceName;
+        if (confName) conferenceCallMap.delete(confName);
+        inboundCalls.delete(CallSid);
+        
+        res.type('text/xml');
+        res.send('<?xml version="1.0" encoding="UTF-8"?><Response></Response>');
+    } else {
+        // Not answered (no-answer, busy, canceled, failed)
+        console.log('   📞 Incoming call not answered:', DialCallStatus);
+        
         const twiml = `<?xml version="1.0" encoding="UTF-8"?>
 <Response>
     <Say voice="alice">We are sorry, no one is available to take your call right now. Please try again later. Jazak Allahu Khairan.</Say>
     <Hangup/>
 </Response>`;
         
-        // Mark as missed
-        if (incomingCall && incomingCall.status === 'ringing') {
-            incomingCall.status = 'missed';
-            broadcastIncomingCallStatus(CallSid, 'missed', {
-                callerName: incomingCall.callerName,
-                from: incomingCall.from
-            });
-            saveInboundCallHistory(incomingCall, 'Missed', 0);
-            inboundCalls.delete(CallSid);
-        }
+        // Determine status
+        let finalStatus = 'Missed';
+        if (DialCallStatus === 'busy') finalStatus = 'Busy';
+        else if (DialCallStatus === 'canceled') finalStatus = 'Canceled';
+        else if (DialCallStatus === 'failed') finalStatus = 'Failed';
+        
+        incomingCall.status = DialCallStatus;
+        broadcastIncomingCallStatus(CallSid, 'missed', {
+            callerName: incomingCall.callerName,
+            from: incomingCall.from
+        });
+        saveInboundCallHistory(incomingCall, finalStatus, 0);
+        
+        // Clean up
+        const confName = incomingCall.conferenceName;
+        if (confName) conferenceCallMap.delete(confName);
+        inboundCalls.delete(CallSid);
         
         res.type('text/xml');
         res.send(twiml);
-    } else {
-        // Call was answered and completed normally
-        res.type('text/xml');
-        res.send('<?xml version="1.0" encoding="UTF-8"?><Response></Response>');
     }
 });
 
-// Webhook for incoming call status updates
+// Webhook for incoming call status updates (from phone number config)
+// Note: dial-complete is the primary handler. This is a backup.
 app.post('/webhooks/voice-incoming-status', async (req, res) => {
     const { CallSid, CallStatus, CallDuration } = req.body;
     
@@ -2638,13 +2755,17 @@ app.post('/webhooks/voice-incoming-status', async (req, res) => {
     
     const incomingCall = inboundCalls.get(CallSid);
     
+    // Only process if call is still in our map (dial-complete hasn't handled it yet)
     if (incomingCall) {
         const duration = parseInt(CallDuration) || 0;
         
         if (CallStatus === 'completed' || CallStatus === 'busy' || CallStatus === 'no-answer' || CallStatus === 'canceled' || CallStatus === 'failed') {
-            console.log('   📞 Incoming call ended:', CallStatus);
+            console.log('   📞 Incoming call ended (status webhook):', CallStatus);
             
-            // Determine final status
+            // Calculate duration
+            const calculatedDuration = duration > 0 ? duration :
+                (incomingCall.answeredTime ? Math.floor((Date.now() - incomingCall.answeredTime) / 1000) : 0);
+            
             let finalStatus = 'Missed';
             if (incomingCall.answeredBy) {
                 finalStatus = 'Completed';
@@ -2657,21 +2778,24 @@ app.post('/webhooks/voice-incoming-status', async (req, res) => {
             }
             
             incomingCall.status = CallStatus;
-            incomingCall.duration = duration;
+            incomingCall.duration = calculatedDuration;
             
-            // Save to call history
-            saveInboundCallHistory(incomingCall, finalStatus, duration);
+            // Save to call history (backup - dial-complete may have already done this)
+            saveInboundCallHistory(incomingCall, finalStatus, calculatedDuration);
             
-            // Broadcast status
             broadcastIncomingCallStatus(CallSid, CallStatus, { 
-                duration, 
+                duration: calculatedDuration, 
                 callerName: incomingCall.callerName,
                 from: incomingCall.from
             });
             
             // Clean up
+            const confName = incomingCall.conferenceName;
+            if (confName) conferenceCallMap.delete(confName);
             inboundCalls.delete(CallSid);
         }
+    } else {
+        console.log('   ℹ️ Call already handled by dial-complete');
     }
     
     res.status(200).send('OK');
@@ -2679,6 +2803,10 @@ app.post('/webhooks/voice-incoming-status', async (req, res) => {
 
 // Helper function to save inbound call to history
 async function saveInboundCallHistory(callData, status, duration) {
+    // Check if recording exists in recordings map
+    const recording = recordingsMap.get(callData.callSid);
+    const recordingUrl = callData.recordingUrl || (recording ? recording.url : null);
+    
     const historyEntry = {
         id: Date.now(),
         callSid: callData.callSid,
@@ -2690,16 +2818,40 @@ async function saveInboundCallHistory(callData, status, duration) {
         status: `Inbound - ${status}`,
         timestamp: new Date(callData.startTime).toISOString(),
         direction: 'inbound',
-        recordingUrl: null
+        recordingUrl: recordingUrl
     };
     
     try {
         if (isDbConnected()) {
-            await CallHistory.create(historyEntry);
-            console.log('   💾 Inbound call saved to database');
+            // Check for duplicate first
+            const existing = await CallHistory.findOne({ callSid: callData.callSid });
+            if (existing) {
+                // Update existing entry with latest info (e.g. recording URL, duration)
+                await CallHistory.findOneAndUpdate(
+                    { callSid: callData.callSid },
+                    { 
+                        duration: duration || existing.duration,
+                        recordingUrl: recordingUrl || existing.recordingUrl,
+                        status: `Inbound - ${status}`,
+                        teacherName: callData.answeredBy || existing.teacherName
+                    }
+                );
+                console.log('   💾 Inbound call updated in database (was already saved)');
+            } else {
+                await CallHistory.create(historyEntry);
+                console.log('   💾 Inbound call saved to database');
+            }
         } else {
-            inMemoryCallHistory.unshift(historyEntry);
-            console.log('   💾 Inbound call saved to memory');
+            // Check memory for duplicate
+            const existingIdx = inMemoryCallHistory.findIndex(h => h.callSid === callData.callSid);
+            if (existingIdx >= 0) {
+                // Update existing
+                inMemoryCallHistory[existingIdx] = { ...inMemoryCallHistory[existingIdx], ...historyEntry };
+                console.log('   💾 Inbound call updated in memory');
+            } else {
+                inMemoryCallHistory.unshift(historyEntry);
+                console.log('   💾 Inbound call saved to memory');
+            }
         }
     } catch (err) {
         console.error('   ❌ Failed to save inbound call history:', err.message);

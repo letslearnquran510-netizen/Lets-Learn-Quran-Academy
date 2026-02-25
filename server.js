@@ -1644,6 +1644,63 @@ app.post('/api/voice-token', (req, res) => {
     }
 });
 
+// Debug endpoint to check voice configuration
+app.get('/api/voice-debug', async (req, res) => {
+    const checks = {
+        timestamp: new Date().toISOString(),
+        publicUrl: config.publicUrl,
+        twilioAccountSid: config.twilio.accountSid ? config.twilio.accountSid.substring(0, 6) + '...' : 'NOT SET',
+        apiKeySid: process.env.TWILIO_API_KEY_SID ? process.env.TWILIO_API_KEY_SID.substring(0, 6) + '...' : 'NOT SET',
+        apiKeyFormat: process.env.TWILIO_API_KEY_SID 
+            ? (process.env.TWILIO_API_KEY_SID.startsWith('SK') ? '✅ Correct (starts with SK)' : '❌ WRONG FORMAT - API Key SID must start with SK, yours starts with: ' + process.env.TWILIO_API_KEY_SID.substring(0, 2))
+            : '❌ NOT SET',
+        apiSecretSet: process.env.TWILIO_API_KEY_SECRET ? '✅ Set (' + process.env.TWILIO_API_KEY_SECRET.length + ' chars)' : '❌ NOT SET',
+        twimlAppSid: twimlAppSid || '❌ NOT SET - ensureTwimlApp may have failed',
+        twimlAppVoiceUrl: twimlAppSid ? `${config.publicUrl}/twiml/client-voice` : 'N/A',
+    };
+    
+    // Test TwiML App exists
+    if (twimlAppSid && twilioClient) {
+        try {
+            const app = await twilioClient.applications(twimlAppSid).fetch();
+            checks.twimlAppStatus = '✅ Exists';
+            checks.twimlAppName = app.friendlyName;
+            checks.twimlAppCurrentVoiceUrl = app.voiceUrl;
+        } catch (e) {
+            checks.twimlAppStatus = '❌ NOT FOUND: ' + e.message;
+        }
+    }
+    
+    // Test token generation
+    try {
+        const testToken = generateVoiceToken('test_debug');
+        checks.tokenGeneration = '✅ Success';
+        
+        // Decode JWT payload
+        const parts = testToken.split('.');
+        if (parts.length === 3) {
+            const payload = JSON.parse(Buffer.from(parts[1], 'base64').toString());
+            checks.tokenIssuer = payload.iss || 'missing';
+            checks.tokenGrants = payload.grants ? Object.keys(payload.grants) : 'none';
+            if (payload.grants && payload.grants.voice) {
+                checks.voiceGrantOutgoing = payload.grants.voice.outgoing 
+                    ? '✅ outgoingApplicationSid present' 
+                    : '❌ NO outgoingApplicationSid';
+                checks.voiceGrantIncoming = payload.grants.voice.incoming 
+                    ? '✅ incoming allowed' 
+                    : '❌ NO incoming';
+            } else {
+                checks.voiceGrant = '❌ No voice grant in token';
+            }
+        }
+    } catch (e) {
+        checks.tokenGeneration = '❌ Failed: ' + e.message;
+    }
+    
+    console.log('🔍 Voice Debug:', JSON.stringify(checks, null, 2));
+    res.json(checks);
+});
+
 // Create a new video room and send invite to student
 app.post('/api/video/create-room', async (req, res) => {
     const { studentId, studentName, studentPhone, teacherId, teacherName } = req.body;

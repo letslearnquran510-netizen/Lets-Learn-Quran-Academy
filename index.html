@@ -2084,7 +2084,8 @@
                     // NO device.register() needed! device.connect() works without it.
                     this.device = new Twilio.Device(data.token, {
                         codecPreferences: ['opus', 'pcmu'],
-                        logLevel: 'warn'
+                        logLevel: 'debug',  // TEMPORARY: debug mode to diagnose 53000
+                        enableImprovedSignalingErrorPrecision: true  // Get specific error codes
                     });
                     
                     // Token refresh handler
@@ -2094,11 +2095,28 @@
                     });
                     
                     this.device.on('error', (error) => {
-                        console.error('📞 Device error:', error.message || error);
+                        console.error('📞 Device error:', error.code, error.message);
+                        if (error.causes) console.error('   Causes:', error.causes);
+                        if (error.solutions) console.error('   Solutions:', error.solutions);
                     });
                     
                     this.isReady = true;
                     console.log('📞 ✅ Twilio Voice Device READY (conference mode) - identity:', data.identity);
+                    
+                    // Debug: decode token to verify grants
+                    try {
+                        const parts = data.token.split('.');
+                        if (parts.length === 3) {
+                            const payload = JSON.parse(atob(parts[1]));
+                            console.log('📞 Token grants:', JSON.stringify(payload.grants));
+                            if (payload.grants && payload.grants.voice && payload.grants.voice.outgoing) {
+                                console.log('📞 ✅ Token has outgoing app SID');
+                            } else {
+                                console.error('📞 ❌ Token MISSING outgoing app SID - device.connect() will fail!');
+                            }
+                        }
+                    } catch(e) { console.log('Token decode error:', e.message); }
+                    
                     return true;
                     
                 } catch (err) {
@@ -2171,7 +2189,9 @@
                     return call;
                     
                 } catch (err) {
-                    console.error('📞 Connect to conference error:', err);
+                    console.error('📞 Connect to conference error:', err.code, err.message);
+                    if (err.causes) console.error('   Causes:', err.causes);
+                    if (err.solutions) console.error('   Solutions:', err.solutions);
                     return null;
                 }
             },

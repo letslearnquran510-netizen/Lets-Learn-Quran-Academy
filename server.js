@@ -2088,7 +2088,8 @@ function broadcastVideoEvent(roomName, eventType, data) {
 // TWILIO CALLING ENDPOINTS
 // ==========================================================
 
-// POST /make-call - Initiate a phone call
+// POST /make-call - Initiate a phone call using Conference approach
+// Flow: 1) Create conference name  2) Call student → put in Conference  3) Return conf name to frontend  4) Frontend joins via device.connect()
 app.post('/make-call', async (req, res) => {
     const { to, name } = req.body;
     
@@ -2107,8 +2108,12 @@ app.post('/make-call', async (req, res) => {
     }
     
     try {
+        // Create unique conference name for this call
+        const confName = `outbound_${Date.now()}_${Math.random().toString(36).substring(2, 8)}`;
+        
+        // Call the student's phone - when they answer, put them in the Conference
         const call = await twilioClient.calls.create({
-            url: `${config.publicUrl}/twiml/outbound`,
+            url: `${config.publicUrl}/twiml/outbound-conference?conference=${encodeURIComponent(confName)}`,
             to: to,
             from: config.twilio.phoneNumber,
             record: true,
@@ -2127,15 +2132,17 @@ app.post('/make-call', async (req, res) => {
             duration: 0,
             startTime: Date.now(),
             recordingUrl: null,
-            recordingSid: null
+            recordingSid: null,
+            conferenceName: confName
         });
         
-        console.log('✅ Call created - SID:', call.sid);
+        console.log('✅ Call created - SID:', call.sid, 'Conference:', confName);
         broadcastCallStatus(call.sid, 'initiated', 0, null);
         
         res.json({
             success: true,
             callSid: call.sid,
+            conferenceName: confName,
             message: 'Call initiated successfully'
         });
         
@@ -2272,9 +2279,45 @@ app.post('/hangup-call', async (req, res) => {
 // ---------------------------------------------------------
 // TWIML ENDPOINTS
 // ---------------------------------------------------------
+// TwiML for outbound calls - puts student in Conference room
+// When student answers, they join the Conference where admin is already waiting
+app.post('/twiml/outbound-conference', (req, res) => {
+    const conference = req.query.conference || req.body.conference;
+    const { CallSid } = req.body;
+    console.log('📞 Outbound Conference TwiML for:', CallSid, 'Conference:', conference);
+    
+    if (!conference) {
+        const twiml = `<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+    <Say voice="alice">Sorry, there was a connection error.</Say>
+    <Hangup/>
+</Response>`;
+        res.type('text/xml');
+        return res.send(twiml);
+    }
+    
+    const safeConf = conference.replace(/[^a-zA-Z0-9_]/g, '');
+    
+    const twiml = `<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+    <Say voice="alice">You have a call from Quran Academy.</Say>
+    <Dial>
+        <Conference startConferenceOnEnter="true" endConferenceOnExit="true"
+                    beep="false" maxParticipants="2">
+            ${safeConf}
+        </Conference>
+    </Dial>
+</Response>`;
+    
+    console.log('   📤 Student joining conference:', safeConf);
+    res.type('text/xml');
+    res.send(twiml);
+});
+
+// Legacy outbound TwiML (fallback)
 app.post('/twiml/outbound', (req, res) => {
     const { CallSid } = req.body;
-    console.log('📞 TwiML requested for:', CallSid);
+    console.log('📞 Legacy outbound TwiML for:', CallSid);
     
     const twiml = `<?xml version="1.0" encoding="UTF-8"?>
 <Response>

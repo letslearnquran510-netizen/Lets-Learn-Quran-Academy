@@ -1558,18 +1558,35 @@
             
             // Download recording function
             const downloadRecording = async (recordingUrl, studentName, callSid) => {
-                if (!recordingUrl) {
-                    alert('Recording not available');
-                    return;
-                }
-                
                 try {
+                    let downloadUrl = recordingUrl;
+                    
+                    // If no direct URL, fetch from server using callSid
+                    if (!downloadUrl && callSid) {
+                        const response = await fetch(`${BACKEND_URL}/recording/${callSid}`);
+                        const data = await response.json();
+                        if (data.success && data.recordingUrl) {
+                            // Use proxy URL for downloading
+                            downloadUrl = `${BACKEND_URL}/recording-audio/${callSid}`;
+                        }
+                    }
+                    
+                    if (!downloadUrl) {
+                        alert('Recording not available yet. Please try again in a moment.');
+                        return;
+                    }
+                    
+                    // If it's a Twilio URL, use proxy
+                    if (downloadUrl.includes('twilio.com') && callSid) {
+                        downloadUrl = `${BACKEND_URL}/recording-audio/${callSid}`;
+                    }
+                    
                     // Create filename
                     const date = new Date().toISOString().split('T')[0];
                     const filename = `Recording_${studentName.replace(/\s+/g, '_')}_${date}_${callSid || 'call'}.mp3`;
                     
                     // Fetch the recording
-                    const response = await fetch(recordingUrl);
+                    const response = await fetch(downloadUrl);
                     const blob = await response.blob();
                     
                     // Create download link
@@ -1586,8 +1603,12 @@
                     document.body.removeChild(a);
                 } catch (err) {
                     console.error('Download error:', err);
-                    // Fallback: open in new tab
-                    window.open(recordingUrl, '_blank');
+                    // Fallback: try proxy URL
+                    if (callSid) {
+                        window.open(`${BACKEND_URL}/recording-audio/${callSid}`, '_blank');
+                    } else {
+                        alert('Failed to download recording.');
+                    }
                 }
             };
 
@@ -1762,7 +1783,7 @@
                                                 )}
                                                 
                                                 {/* Download Recording Button - Voice calls only */}
-                                                {call.recordingUrl && user.type === 'admin' && call.status.includes('Completed') && call.duration > 0 && !callType.isVideo && (
+                                                {call.callSid && user.type === 'admin' && call.status.includes('Completed') && call.duration > 0 && !callType.isVideo && (
                                                     <button 
                                                         onClick={() => downloadRecording(call.recordingUrl, call.studentName, call.callSid)}
                                                         className={`flex items-center gap-2 px-3 py-2 font-semibold rounded-lg text-sm transition-colors ${darkMode ? 'bg-slate-600 text-white hover:bg-slate-500' : 'bg-slate-200 text-slate-700 hover:bg-slate-300'}`}

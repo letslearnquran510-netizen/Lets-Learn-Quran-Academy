@@ -2645,10 +2645,14 @@ app.post('/webhooks/voice-incoming', async (req, res) => {
         broadcastIncomingCall(incomingCallData);
     }
     
-    // STEP 4: Missed call safety timer (90 seconds)
+    // STEP 4: Safety cleanup timer (120 seconds)
+    // If dial-complete hasn't handled the call by then, save and clean up
     setTimeout(async () => {
         const call = inboundCalls.get(CallSid);
-        if (call && call.status === 'ringing') {
+        if (!call) return; // Already handled by dial-complete
+        
+        if (call.status === 'ringing') {
+            // Nobody answered in 120 seconds
             console.log('   ⏰ Missed call timeout for:', CallSid);
             try {
                 await twilioClient.calls(CallSid).update({
@@ -2657,12 +2661,20 @@ app.post('/webhooks/voice-incoming', async (req, res) => {
             } catch (e) {
                 console.log('   ⚠️ Could not end timed-out call:', e.message);
             }
-            call.status = 'missed';
             broadcastIncomingCallStatus(CallSid, 'missed', { callerName: call.callerName, from: call.from });
             saveInboundCallHistory(call, 'Missed', 0);
-            inboundCalls.delete(CallSid);
+        } else if (call.answeredBy) {
+            // Call was answered but dial-complete never fired (stale)
+            console.log('   ⏰ Stale answered call cleanup for:', CallSid);
+            const duration = call.answeredTime ? Math.floor((Date.now() - call.answeredTime) / 1000) : 0;
+            saveInboundCallHistory(call, 'Completed', duration);
         }
-    }, 90000);
+        
+        // Clean up
+        const confName = call.conferenceName;
+        if (confName) conferenceCallMap.delete(confName);
+        inboundCalls.delete(CallSid);
+    }, 120000);
 });
 
 // Webhook for when <Dial> completes (called for ALL outcomes - answered, no-answer, etc.)
@@ -2670,13 +2682,24 @@ app.post('/webhooks/voice-incoming-dial-complete', (req, res) => {
     const { CallSid, DialCallStatus, DialCallDuration, RecordingUrl } = req.body;
     console.log('📞 Dial completed for:', CallSid, 'Status:', DialCallStatus, 'Duration:', DialCallDuration);
     
-    const incomingCall = inboundCalls.get(CallSid);
+    let incomingCall = inboundCalls.get(CallSid);
     
+    // If call not in map (server restart or race condition), create minimal entry
     if (!incomingCall) {
-        console.log('   ⚠️ No cached incoming call found for:', CallSid);
-        res.type('text/xml');
-        res.send('<?xml version="1.0" encoding="UTF-8"?><Response></Response>');
-        return;
+        console.log('   ⚠️ Call not in memory map - creating from available data');
+        incomingCall = {
+            callSid: CallSid,
+            from: req.body.From || 'Unknown',
+            to: req.body.To || '',
+            callerName: 'Unknown Caller',
+            studentId: null,
+            status: DialCallStatus,
+            startTime: Date.now(),
+            answeredBy: DialCallStatus === 'completed' ? 'Administrator' : null,
+            answeredTime: DialCallStatus === 'completed' ? Date.now() : null,
+            conferenceName: `inbound_${CallSid}`,
+            recordingUrl: null
+        };
     }
     
     const duration = parseInt(DialCallDuration) || 0;
@@ -2693,6 +2716,14 @@ app.post('/webhooks/voice-incoming-dial-complete', (req, res) => {
         if (RecordingUrl) {
             incomingCall.recordingUrl = RecordingUrl + '.mp3';
             console.log('   🎙️ Recording URL:', incomingCall.recordingUrl);
+            
+            // Also store in recordingsMap for later lookup
+            recordingsMap.set(CallSid, {
+                sid: null,
+                url: RecordingUrl + '.mp3',
+                duration: calculatedDuration,
+                timestamp: Date.now()
+            });
         }
         
         // Save to history
@@ -2747,7 +2778,8 @@ app.post('/webhooks/voice-incoming-dial-complete', (req, res) => {
 });
 
 // Webhook for incoming call status updates (from phone number config)
-// Note: dial-complete is the primary handler. This is a backup.
+// Note: dial-complete is the primary handler for saving history.
+// This webhook only updates status - does NOT delete from map or save history.
 app.post('/webhooks/voice-incoming-status', async (req, res) => {
     const { CallSid, CallStatus, CallDuration } = req.body;
     
@@ -2755,44 +2787,23 @@ app.post('/webhooks/voice-incoming-status', async (req, res) => {
     
     const incomingCall = inboundCalls.get(CallSid);
     
-    // Only process if call is still in our map (dial-complete hasn't handled it yet)
     if (incomingCall) {
         const duration = parseInt(CallDuration) || 0;
         
+        // Just update status info - don't save or delete (dial-complete handles that)
+        if (duration > 0) {
+            incomingCall.duration = duration;
+        }
+        
+        // Broadcast status update to UI
         if (CallStatus === 'completed' || CallStatus === 'busy' || CallStatus === 'no-answer' || CallStatus === 'canceled' || CallStatus === 'failed') {
-            console.log('   📞 Incoming call ended (status webhook):', CallStatus);
-            
-            // Calculate duration
-            const calculatedDuration = duration > 0 ? duration :
-                (incomingCall.answeredTime ? Math.floor((Date.now() - incomingCall.answeredTime) / 1000) : 0);
-            
-            let finalStatus = 'Missed';
-            if (incomingCall.answeredBy) {
-                finalStatus = 'Completed';
-            } else if (CallStatus === 'busy') {
-                finalStatus = 'Busy';
-            } else if (CallStatus === 'no-answer') {
-                finalStatus = 'No Answer';
-            } else if (CallStatus === 'canceled') {
-                finalStatus = 'Canceled';
-            }
-            
-            incomingCall.status = CallStatus;
-            incomingCall.duration = calculatedDuration;
-            
-            // Save to call history (backup - dial-complete may have already done this)
-            saveInboundCallHistory(incomingCall, finalStatus, calculatedDuration);
+            console.log('   📞 Incoming call status:', CallStatus, '(dial-complete will handle history)');
             
             broadcastIncomingCallStatus(CallSid, CallStatus, { 
-                duration: calculatedDuration, 
+                duration: duration || (incomingCall.answeredTime ? Math.floor((Date.now() - incomingCall.answeredTime) / 1000) : 0),
                 callerName: incomingCall.callerName,
                 from: incomingCall.from
             });
-            
-            // Clean up
-            const confName = incomingCall.conferenceName;
-            if (confName) conferenceCallMap.delete(confName);
-            inboundCalls.delete(CallSid);
         }
     } else {
         console.log('   ℹ️ Call already handled by dial-complete');

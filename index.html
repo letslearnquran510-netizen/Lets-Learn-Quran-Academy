@@ -2151,31 +2151,33 @@
             
             // Connect to a conference to answer an incoming call
             async connectToConference(callSid) {
+                const confName = `inbound_${callSid}`;
+                return this.joinConference(confName);
+            },
+            
+            // Generic: join any conference by name (used for both inbound and outbound)
+            async joinConference(confName) {
                 if (!this.device) {
                     console.error('📞 No device available');
                     return null;
                 }
                 
-                // Wait for device to be registered (signaling WebSocket open)
+                // Wait for device to be ready
                 if (!this.isReady) {
-                    console.log('📞 Device not registered yet, waiting...');
-                    // Wait up to 5 seconds for registration
+                    console.log('📞 Device not ready yet, waiting...');
                     for (let i = 0; i < 10; i++) {
                         await new Promise(r => setTimeout(r, 500));
                         if (this.isReady) break;
                     }
                     if (!this.isReady) {
-                        console.error('📞 Device registration timeout - cannot connect');
+                        console.error('📞 Device readiness timeout - cannot connect');
                         return null;
                     }
                 }
                 
-                const confName = `inbound_${callSid}`;
-                console.log('📞 Connecting to conference:', confName);
+                console.log('📞 Joining conference:', confName);
                 
                 try {
-                    // device.connect() triggers TwiML App URL with params
-                    // TwiML App returns <Conference> TwiML to join the same room as the caller
                     const call = await this.device.connect({
                         params: {
                             action: 'join-conference',
@@ -2185,48 +2187,34 @@
                     
                     this.activeCall = call;
                     
-                    // Call accepted = audio stream established
                     call.on('accept', () => {
                         console.log('📞 ✅ Conference JOINED - audio connected!');
-                        if (this.onCallAccepted) {
-                            this.onCallAccepted(call);
-                        }
+                        if (this.onCallAccepted) this.onCallAccepted(call);
                     });
                     
-                    // Call disconnected
                     call.on('disconnect', () => {
                         console.log('📞 Conference call DISCONNECTED');
                         this.activeCall = null;
-                        if (this.onCallDisconnected) {
-                            this.onCallDisconnected();
-                        }
+                        if (this.onCallDisconnected) this.onCallDisconnected();
                     });
                     
-                    // Call cancelled (e.g. caller hung up)
                     call.on('cancel', () => {
                         console.log('📞 Conference call CANCELED');
                         this.activeCall = null;
-                        if (this.onCallDisconnected) {
-                            this.onCallDisconnected();
-                        }
+                        if (this.onCallDisconnected) this.onCallDisconnected();
                     });
                     
-                    // Call error
                     call.on('error', (error) => {
-                        console.error('📞 Conference call error:', error.message || error);
+                        console.error('📞 Conference call error:', error?.message || error);
                         this.activeCall = null;
-                        if (this.onCallDisconnected) {
-                            this.onCallDisconnected();
-                        }
+                        if (this.onCallDisconnected) this.onCallDisconnected();
                     });
                     
                     console.log('📞 Conference connection initiated');
                     return call;
                     
                 } catch (err) {
-                    console.error('📞 Connect to conference error:', err?.code || 'unknown', err?.message || err);
-                    if (err?.causes) console.error('   Causes:', err.causes);
-                    if (err?.solutions) console.error('   Solutions:', err.solutions);
+                    console.error('📞 Join conference error:', err?.code || 'unknown', err?.message || err);
                     return null;
                 }
             },
@@ -3322,6 +3310,13 @@
                 audioManager.stop();
                 window.speechSynthesis.cancel();
                 wsManager.unsubscribe(); // Unsubscribe from WebSocket call updates
+                
+                // Disconnect browser audio from conference
+                if (twilioVoiceManager.activeCall) {
+                    console.log('📞 Disconnecting browser from conference...');
+                    twilioVoiceManager.hangup();
+                }
+                
                 if (mediaStreamRef.current) {
                     mediaStreamRef.current.getTracks().forEach(track => track.stop());
                     mediaStreamRef.current = null;
@@ -3367,6 +3362,12 @@
                 if (mediaStreamRef.current) {
                     mediaStreamRef.current.getTracks().forEach(track => track.stop());
                     mediaStreamRef.current = null;
+                }
+                
+                // Disconnect browser from conference (outbound calls)
+                if (twilioVoiceManager.activeCall) {
+                    console.log('📞 Disconnecting browser from conference (handleCallEnd)...');
+                    twilioVoiceManager.hangup();
                 }
                 
                 // Get student data before clearing
@@ -3664,9 +3665,28 @@
                     console.log('📡 Subscribed to real-time updates for call:', data.callSid);
                     
                     setCallState(s => {
-                        if (s.status === 'finished') return s; // Don't start a call if already finished
-                        return { ...s, sid: data.callSid };
+                        if (s.status === 'finished') return s;
+                        return { ...s, sid: data.callSid, conferenceName: data.conferenceName || null };
                     });
+                    
+                    // JOIN THE CONFERENCE via Twilio Device so admin can hear/speak
+                    if (data.conferenceName) {
+                        console.log('📞 Joining outbound conference:', data.conferenceName);
+                        
+                        // Make sure voice device is ready
+                        if (!twilioVoiceManager.isReady) {
+                            console.log('📞 Initializing voice device for outbound call...');
+                            await twilioVoiceManager.init(user.name || 'Administrator');
+                            await new Promise(r => setTimeout(r, 1000));
+                        }
+                        
+                        const voiceCall = await twilioVoiceManager.joinConference(data.conferenceName);
+                        if (voiceCall) {
+                            console.log('📞 ✅ Admin joined outbound conference - audio will connect when student answers');
+                        } else {
+                            console.error('📞 ❌ Failed to join outbound conference');
+                        }
+                    }
                 } catch (err) {
                     console.error("Call initiation error:", err);
                     handleCallEnd({ finalStatus: 'failed', finalDuration: 0, recordingUrl: null });
@@ -3674,13 +3694,24 @@
             }, [handleCallEnd, addToast]);
 
             const handleToggleMute = () => {
-                if (!mediaStreamRef.current) return;
                 if (callStateRef.current.status === 'finished') return;
                 const isCurrentlyMuted = callStateRef.current.isMuted;
-                mediaStreamRef.current.getAudioTracks().forEach(track => { track.enabled = isCurrentlyMuted; });
+                const newMuted = !isCurrentlyMuted;
+                
+                // Use Twilio SDK mute if active conference call exists
+                if (twilioVoiceManager.activeCall) {
+                    twilioVoiceManager.activeCall.mute(newMuted);
+                    console.log('📞 Twilio call mute:', newMuted);
+                }
+                
+                // Also mute local media stream if available (fallback)
+                if (mediaStreamRef.current) {
+                    mediaStreamRef.current.getAudioTracks().forEach(track => { track.enabled = !newMuted; });
+                }
+                
                 setCallState(s => {
                     if (s.status === 'finished') return s;
-                    return { ...s, isMuted: !isCurrentlyMuted };
+                    return { ...s, isMuted: newMuted };
                 });
             };
             

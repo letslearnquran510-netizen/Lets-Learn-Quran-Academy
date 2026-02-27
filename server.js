@@ -432,14 +432,22 @@ setInterval(() => {
     }
 }, 10 * 60 * 1000); // Every 10 minutes
 
-// Clean up stale inbound calls (older than 2 minutes - not answered)
+// Clean up stale inbound calls (older than 3 minutes - not handled by dial-complete)
 setInterval(() => {
     const now = Date.now();
-    const TWO_MINUTES = 2 * 60 * 1000;
+    const THREE_MINUTES = 3 * 60 * 1000;
     let cleaned = 0;
     
     inboundCalls.forEach((callData, callSid) => {
-        if (now - (callData.timestamp || 0) > TWO_MINUTES) {
+        if (now - (callData.startTime || 0) > THREE_MINUTES) {
+            // Save to history before deleting if it was answered
+            if (callData.answeredBy) {
+                const duration = callData.answeredTime ? Math.floor((now - callData.answeredTime) / 1000) : 0;
+                saveInboundCallHistory(callData, 'Completed', duration);
+                console.log(`🧹 Stale answered inbound call saved and cleaned: ${callSid}`);
+            }
+            const confName = callData.conferenceName;
+            if (confName) conferenceCallMap.delete(confName);
             inboundCalls.delete(callSid);
             cleaned++;
         }
@@ -448,7 +456,7 @@ setInterval(() => {
     if (cleaned > 0) {
         console.log(`🧹 Cleaned ${cleaned} stale inbound calls. Remaining: ${inboundCalls.size}`);
     }
-}, 30 * 1000); // Every 30 seconds
+}, 60 * 1000); // Every 60 seconds
 
 // Log memory usage periodically (helps monitor for issues)
 setInterval(() => {
@@ -2314,36 +2322,8 @@ app.post('/twiml/outbound-conference', (req, res) => {
     res.send(twiml);
 });
 
-// Legacy outbound TwiML (fallback)
-app.post('/twiml/outbound', (req, res) => {
-    const { CallSid } = req.body;
-    console.log('📞 Legacy outbound TwiML for:', CallSid);
-    
-    const twiml = `<?xml version="1.0" encoding="UTF-8"?>
-<Response>
-    <Say voice="alice">You have a call from Quran Academy. Please hold.</Say>
-    <Pause length="120"/>
-</Response>`;
-    
-    res.type('text/xml');
-    res.send(twiml);
-});
-
-app.all('/twiml/conference', (req, res) => {
-    const conferenceName = `call-${Date.now()}`;
-    const twiml = `<?xml version="1.0" encoding="UTF-8"?>
-<Response>
-    <Say voice="alice">You are now connected.</Say>
-    <Dial>
-        <Conference startConferenceOnEnter="true" endConferenceOnExit="true" record="record-from-start">
-            ${conferenceName}
-        </Conference>
-    </Dial>
-</Response>`;
-    
-    res.type('text/xml');
-    res.send(twiml);
-});
+// Legacy endpoints removed - outbound calls now use /twiml/outbound-conference
+// Conference calls now use named conferences via /twiml/client-voice
 
 // ---------------------------------------------------------
 // RECORDING ENDPOINTS

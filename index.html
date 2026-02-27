@@ -382,10 +382,11 @@
             }
         }
         
-        // Global instance - automatically used for all calls
+        // Global instance - used for VIDEO calls only (not voice calls)
+        // Voice calls use browser-native WebRTC constraints via Twilio SDK
         const noiseCancellation = new ProfessionalNoiseCancellation();
         
-        // Helper function to get noise-cancelled audio stream
+        // Helper function to get noise-cancelled audio stream (for VIDEO calls only)
         async function getCleanAudioStream(constraints = { audio: true }) {
             try {
                 // Get raw microphone stream
@@ -403,32 +404,16 @@
             }
         }
         
-        // Enhanced getUserMedia that automatically applies noise cancellation
-        const originalGetUserMedia = navigator.mediaDevices.getUserMedia.bind(navigator.mediaDevices);
-        navigator.mediaDevices.getUserMedia = async function(constraints) {
-            const stream = await originalGetUserMedia(constraints);
-            
-            // Only process if audio is requested
-            if (constraints && (constraints.audio === true || typeof constraints.audio === 'object')) {
-                try {
-                    const processedStream = await noiseCancellation.processStream(stream);
-                    console.log('🔇 Automatic noise cancellation applied');
-                    return processedStream;
-                } catch (err) {
-                    console.warn('Noise cancellation failed, using original stream:', err);
-                    return stream;
-                }
-            }
-            
-            return stream;
-        };
+        // NOTE: We do NOT override navigator.mediaDevices.getUserMedia globally anymore.
+        // Overriding it caused DOUBLE audio processing for Twilio voice calls:
+        //   Admin mic → Web Audio filters → Twilio SDK → WebRTC filters → Student = DISTORTED
+        // Instead, Twilio voice calls use native WebRTC constraints (echoCancellation, 
+        // noiseSuppression, autoGainControl) passed via Device audioConstraints.
+        // Video calls still use the ProfessionalNoiseCancellation class directly via getCleanAudioStream().
         
-        console.log('🎯 Professional Noise Cancellation System Loaded');
-        console.log('   ✓ High-pass filter (removes rumble below 80Hz)');
-        console.log('   ✓ Low-pass filter (removes hiss above 12kHz)');
-        console.log('   ✓ Notch filters (removes 50Hz/60Hz electrical hum)');
-        console.log('   ✓ Dynamic compressor (reduces background noise)');
-        console.log('   ✓ Automatic gain control');
+        console.log('🎯 Audio Processing System Loaded');
+        console.log('   ✓ Voice Calls: Browser-native WebRTC noise suppression (via Twilio SDK)');
+        console.log('   ✓ Video Calls: Professional noise cancellation filters (Web Audio API)');
 
         // --- From constants.ts ---
         const ADMIN_PASSWORD = 'Quran@123';
@@ -2132,7 +2117,19 @@
                     this.device = new Twilio.Device(data.token, {
                         codecPreferences: ['opus', 'pcmu'],
                         logLevel: 'warn',
-                        enableImprovedSignalingErrorPrecision: true
+                        enableImprovedSignalingErrorPrecision: true,
+                        // Use browser-native WebRTC noise suppression
+                        // This is hardware-accelerated and much better than Web Audio API filters
+                        // It does NOT double-process like the old getUserMedia override did
+                        audioConstraints: {
+                            echoCancellation: true,
+                            noiseSuppression: true,
+                            autoGainControl: true,
+                            // Chrome-specific advanced constraints for better quality
+                            channelCount: 1,
+                            sampleRate: 48000,
+                            sampleSize: 16
+                        }
                     });
                     
                     // Token refresh handler
@@ -2209,6 +2206,14 @@
                         params: {
                             action: 'join-conference',
                             conference: confName
+                        },
+                        // Reinforce audio constraints at call level
+                        rtcConstraints: {
+                            audio: {
+                                echoCancellation: true,
+                                noiseSuppression: true,
+                                autoGainControl: true
+                            }
                         }
                     });
                     

@@ -142,46 +142,177 @@ async function waitForDbConnection(timeoutMs = 5000) {
 }
 
 if (config.mongoUri) {
-    // OPTIMIZED MongoDB connection for HIGH LOAD (400+ concurrent users)
-    mongoose.connect(config.mongoUri, {
-        // Connection pool settings - critical for high concurrency
-        maxPoolSize: 100,          // Max connections in pool (handles 400+ users)
-        minPoolSize: 10,           // Keep minimum connections ready
-        maxIdleTimeMS: 30000,      // Close idle connections after 30s
-        serverSelectionTimeoutMS: 5000,  // Fail fast if can't connect
-        socketTimeoutMS: 45000,    // Socket timeout
-        family: 4,                 // Use IPv4
-        
-        // Buffer commands when disconnected (prevents errors during reconnect)
-        bufferCommands: true,
-        
-        // Retry settings
-        retryWrites: true,
-        retryReads: true,
-    })
-    .then(() => {
-        console.log('✅ MongoDB CONNECTED ✓ (High-Performance Pool: 100 connections)');
-        dbConnected = true;
-        initializeAdmin();
-    })
-    .catch(err => {
-        console.error('❌ MongoDB connection error:', err.message);
-    });
+    // ================================================================
+    // ULTRA-RELIABLE MONGODB CONNECTION - NEVER SLEEP, NEVER DISCONNECT
+    // 5 LAYERS OF PROTECTION:
+    //   Layer 1: Aggressive connection options (heartbeat, keepAlive, retry)
+    //   Layer 2: Auto-reconnect on disconnect event
+    //   Layer 3: Keep-alive ping every 2 minutes (prevents Atlas pause)
+    //   Layer 4: Deep health check every 30 seconds (detects zombie connections)
+    //   Layer 5: Watchdog timer - if no successful ping in 5 min, force reconnect
+    // ================================================================
     
-    // Handle connection events
+    let lastSuccessfulPing = Date.now();
+    let isReconnecting = false;
+    let reconnectAttempts = 0;
+    
+    function connectMongoDB() {
+        if (isReconnecting && mongoose.connection.readyState === 2) {
+            console.log('⏳ MongoDB already reconnecting, waiting...');
+            return;
+        }
+        
+        isReconnecting = true;
+        
+        mongoose.connect(config.mongoUri, {
+            // Connection pool - always keep connections ready
+            maxPoolSize: 100,
+            minPoolSize: 15,           // More min connections = faster recovery
+            
+            // NEVER let connections go idle
+            maxIdleTimeMS: 120000,     // 2 minutes idle before close (Atlas needs activity within 5 min)
+            
+            // Timeouts
+            serverSelectionTimeoutMS: 15000,  // 15s to find server
+            socketTimeoutMS: 60000,           // 60s socket timeout
+            connectTimeoutMS: 30000,          // 30s to establish connection
+            
+            // Network
+            family: 4,                 // IPv4 only - more reliable
+            
+            // Keep TCP connection alive at OS level
+            keepAlive: true,
+            keepAliveInitialDelay: 30000,  // TCP keepAlive ping every 30s
+            
+            // Buffer commands while reconnecting (don't lose writes!)
+            bufferCommands: true,
+            bufferTimeoutMS: 30000,    // Buffer for up to 30s during reconnect
+            
+            // MongoDB driver heartbeat - checks server every 5 seconds
+            heartbeatFrequencyMS: 5000,
+            
+            // Retry everything
+            retryWrites: true,
+            retryReads: true,
+            
+            // Write concern - ensure data is written
+            w: 'majority',
+            wtimeoutMS: 10000,
+        })
+        .then(() => {
+            console.log('✅ MongoDB CONNECTED ✓ (Ultra-Reliable Mode)');
+            dbConnected = true;
+            isReconnecting = false;
+            reconnectAttempts = 0;
+            lastSuccessfulPing = Date.now();
+            initializeAdmin();
+        })
+        .catch(err => {
+            console.error('❌ MongoDB connection failed:', err.message);
+            isReconnecting = false;
+            reconnectAttempts++;
+            
+            // Exponential backoff: 3s, 6s, 12s, 24s, max 30s
+            const delay = Math.min(3000 * Math.pow(2, reconnectAttempts - 1), 30000);
+            console.log(`🔄 Retry #${reconnectAttempts} in ${delay/1000}s...`);
+            setTimeout(connectMongoDB, delay);
+        });
+    }
+    
+    connectMongoDB();
+    
+    // LAYER 2: Auto-reconnect on disconnect event
     mongoose.connection.on('connected', () => {
-        console.log('✅ MongoDB reconnected');
+        console.log('✅ MongoDB connected');
         dbConnected = true;
+        isReconnecting = false;
+        reconnectAttempts = 0;
+        lastSuccessfulPing = Date.now();
     });
     
     mongoose.connection.on('disconnected', () => {
-        console.log('⚠️ MongoDB disconnected');
+        console.log('⚠️ MongoDB DISCONNECTED - forcing reconnect NOW');
         dbConnected = false;
+        
+        // Immediate reconnect attempt
+        if (!isReconnecting) {
+            setTimeout(() => {
+                if (!isDbConnected()) {
+                    console.log('🔄 Auto-reconnecting after disconnect...');
+                    connectMongoDB();
+                }
+            }, 2000);
+        }
     });
     
     mongoose.connection.on('error', (err) => {
         console.error('❌ MongoDB error:', err.message);
+        dbConnected = false;
     });
+    
+    // LAYER 3: Keep-alive PING every 2 minutes
+    // This is the PRIMARY defense against Atlas free tier pausing
+    // Atlas pauses after ~5 min of no activity - we ping every 2 min
+    setInterval(async () => {
+        try {
+            if (mongoose.connection.readyState === 1) {
+                // Use admin ping (lightweight, doesn't read data)
+                await mongoose.connection.db.admin().ping();
+                lastSuccessfulPing = Date.now();
+                dbConnected = true;
+            } else {
+                console.log('🔄 Ping: DB not connected (state:', mongoose.connection.readyState, ')');
+                if (!isReconnecting) connectMongoDB();
+            }
+        } catch (err) {
+            console.error('❌ Ping failed:', err.message);
+            dbConnected = false;
+            lastSuccessfulPing = 0; // Reset - watchdog will catch this
+        }
+    }, 2 * 60 * 1000); // Every 2 minutes
+    
+    // LAYER 4: Deep health check every 30 seconds
+    // Actually queries the database to ensure reads/writes work
+    setInterval(async () => {
+        try {
+            if (mongoose.connection.readyState === 1) {
+                // Do a real lightweight query (count a collection)
+                await mongoose.connection.db.collection('users').estimatedDocumentCount();
+                lastSuccessfulPing = Date.now();
+            }
+        } catch (err) {
+            // Don't log every failure (too noisy), but mark as unhealthy
+            if (dbConnected) {
+                console.error('❌ Health check failed:', err.message);
+                dbConnected = false;
+            }
+        }
+    }, 30 * 1000); // Every 30 seconds
+    
+    // LAYER 5: Watchdog - if no successful ping in 5 minutes, FORCE reconnect
+    setInterval(async () => {
+        const timeSinceLastPing = Date.now() - lastSuccessfulPing;
+        
+        if (timeSinceLastPing > 5 * 60 * 1000) {
+            console.log('🚨 WATCHDOG: No successful DB ping in', Math.round(timeSinceLastPing/1000), 'seconds!');
+            console.log('🔄 WATCHDOG: Force disconnecting and reconnecting...');
+            
+            dbConnected = false;
+            isReconnecting = false;
+            
+            try {
+                await mongoose.disconnect();
+            } catch (e) {
+                console.log('   Disconnect error (expected):', e.message);
+            }
+            
+            // Wait 2s for clean disconnect, then reconnect
+            setTimeout(() => {
+                reconnectAttempts = 0;
+                connectMongoDB();
+            }, 2000);
+        }
+    }, 60 * 1000); // Check every minute
 } else {
     console.log('⚠️ MongoDB URI not configured - using in-memory storage');
     console.log('   Add MONGODB_URI environment variable for permanent storage');

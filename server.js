@@ -1645,7 +1645,9 @@ app.post('/api/voice-token', (req, res) => {
     
     try {
         // Sanitize identity to match what <Client> uses
-        const sanitizedIdentity = identity.replace(/[^a-zA-Z0-9]/g, '_');
+        // Append unique session ID so multiple devices can register simultaneously
+        const sessionId = Math.random().toString(36).substring(2, 8);
+        const sanitizedIdentity = identity.replace(/[^a-zA-Z0-9]/g, '_') + '_' + sessionId;
         const token = generateVoiceToken(sanitizedIdentity);
         
         console.log('🎤 Voice token generated for:', sanitizedIdentity);

@@ -2315,6 +2315,8 @@
             let onIncomingCallStatus = null;
             let subscribedCallSid = null;
             let isConnected = false;
+            let storedUserType = null;
+            let storedUserId = null;
 
             const connect = () => {
                 if (ws && ws.readyState === WebSocket.OPEN) return;
@@ -2337,6 +2339,10 @@
                         // Re-subscribe if we have a call
                         if (subscribedCallSid) {
                             ws.send(JSON.stringify({ type: 'SUBSCRIBE_CALL', callSid: subscribedCallSid }));
+                        }
+                        // Re-send user type on reconnect so server knows admin vs teacher
+                        if (storedUserType) {
+                            ws.send(JSON.stringify({ type: 'SET_USER_TYPE', userType: storedUserType, userId: storedUserId }));
                         }
                     };
                     
@@ -2423,7 +2429,15 @@
             
             const getIsConnected = () => isConnected;
             
-            return { connect, subscribeToCall, unsubscribe, setStatusHandler, setSmsHandler, setIncomingCallHandler, setIncomingCallStatusHandler, disconnect, getIsConnected };
+            const setUserType = (userType, userId) => {
+                storedUserType = userType;
+                storedUserId = userId;
+                if (ws && ws.readyState === WebSocket.OPEN) {
+                    ws.send(JSON.stringify({ type: 'SET_USER_TYPE', userType, userId }));
+                }
+            };
+
+            return { connect, subscribeToCall, unsubscribe, setStatusHandler, setSmsHandler, setIncomingCallHandler, setIncomingCallStatusHandler, disconnect, getIsConnected, setUserType };
         };
 
         // Global WebSocket manager instance
@@ -3121,6 +3135,7 @@
             useEffect(() => {
                 console.log('🔌 Setting up WebSocket connection...');
                 wsManager.connect();
+                wsManager.setUserType(user.type, user.name || user.email);
                 
                 // Set up the status update handler
                 wsManager.setStatusHandler((data) => {

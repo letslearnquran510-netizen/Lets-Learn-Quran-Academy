@@ -565,6 +565,7 @@ wss.on('connection', (ws, req) => {
         lastActivity: Date.now(),
         subscribedCallSid: null,
         userId: null,
+        userType: null, // 'admin' or 'teacher'
         ip: req.socket.remoteAddress
     };
     
@@ -599,6 +600,11 @@ wss.on('connection', (ws, req) => {
                 if (data) data.subscribedCallSid = parsed.callSid;
             } else if (parsed.type === 'SET_USER_ID') {
                 if (data) data.userId = parsed.userId;
+            } else if (parsed.type === 'SET_USER_TYPE') {
+                if (data) {
+                    data.userType = parsed.userType;
+                    data.userId = parsed.userId || data.userId;
+                }
             }
         } catch (e) {
             // Silently ignore parse errors to prevent log spam
@@ -671,7 +677,8 @@ function broadcastIncomingCall(callData) {
     
     let sent = 0;
     wsClients.forEach((clientData, ws) => {
-        if (ws.readyState === WebSocket.OPEN) {
+        // Only send incoming calls to ADMIN clients
+        if (ws.readyState === WebSocket.OPEN && clientData.userType === 'admin') {
             try {
                 ws.send(payload);
                 sent++;
@@ -681,10 +688,10 @@ function broadcastIncomingCall(callData) {
         }
     });
     
-    console.log(`📢 Broadcast incoming call to ${sent}/${wsClients.size} clients`);
+    console.log(`📢 Broadcast incoming call to ${sent} admin client(s)`);
 }
 
-// OPTIMIZED broadcast incoming call status update
+// Broadcast incoming call status update - ADMIN ONLY
 function broadcastIncomingCallStatus(callSid, status, additionalData = {}) {
     const payload = JSON.stringify({
         type: 'INCOMING_CALL_STATUS',
@@ -695,7 +702,8 @@ function broadcastIncomingCallStatus(callSid, status, additionalData = {}) {
     });
     
     wsClients.forEach((clientData, ws) => {
-        if (ws.readyState === WebSocket.OPEN) {
+        // Only send incoming call status to ADMIN clients
+        if (ws.readyState === WebSocket.OPEN && clientData.userType === 'admin') {
             try {
                 ws.send(payload);
             } catch (e) {

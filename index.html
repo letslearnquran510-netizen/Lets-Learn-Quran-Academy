@@ -3263,11 +3263,18 @@
                         incomingCallAudioRef.current = null;
                     }
                     
-                    // For 'answered' status - don't clear the UI, we need it for connected state
-                    // The voice connection handlers will manage the UI from here
+                    // For 'answered' status - check if THIS device answered or another device
                     if (data.status === 'answered') {
+                        // If this device has an active voice connection, keep the UI (we answered)
+                        if (twilioVoiceManager.activeCall) {
+                            setIsAnsweringCall(false);
+                            return; // Keep incomingCall for connected UI on THIS device
+                        }
+                        // Another device answered - dismiss the incoming call UI
+                        setIncomingCall(null);
                         setIsAnsweringCall(false);
-                        return; // Keep incomingCall for connected UI
+                        addToast(`Call answered by ${data.answeredBy || 'another admin'}`, 'info');
+                        return;
                     }
                     
                     if (data.status === 'rejected' || data.status === 'missed' || data.status === 'completed' || data.status === 'canceled') {

@@ -2401,6 +2401,10 @@
             
             const unsubscribe = () => {
                 subscribedCallSid = null;
+                // Also clear on server so we don't receive stale updates
+                if (ws && ws.readyState === WebSocket.OPEN) {
+                    ws.send(JSON.stringify({ type: 'SUBSCRIBE_CALL', callSid: null }));
+                }
             };
             
             const setStatusHandler = (handler) => {

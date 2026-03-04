@@ -57,7 +57,7 @@ app.use(express.static(path.join(__dirname), {
 // =========================================
 const requestCounts = new Map();
 const RATE_LIMIT_WINDOW = 60000; // 1 minute
-const RATE_LIMIT_MAX = 100; // Max 100 requests per minute per IP
+const RATE_LIMIT_MAX = 1000; // Max 1000 requests per minute per IP (handles 200+ teachers behind same proxy)
 
 // Clean up old entries every minute
 setInterval(() => {
@@ -508,23 +508,29 @@ function invalidateAllCaches() {
 // Prevents memory leaks with high traffic
 // =========================================
 
-// Clean up stale active calls (older than 2 hours)
+// Clean up stale active calls
 setInterval(() => {
     const now = Date.now();
-    const TWO_HOURS = 2 * 60 * 60 * 1000;
+    const FIFTEEN_MIN = 15 * 60 * 1000;
+    const ONE_HOUR = 60 * 60 * 1000;
     let cleaned = 0;
     
     activeCalls.forEach((callData, callSid) => {
-        if (now - (callData.startTime || 0) > TWO_HOURS) {
+        const age = now - (callData.startTime || 0);
+        const isTerminal = ['completed', 'busy', 'no-answer', 'canceled', 'failed'].includes(callData.status);
+        
+        // Completed calls: clean after 15 minutes (history already saved)
+        // Active/unknown calls: clean after 1 hour (safety net)
+        if ((isTerminal && age > FIFTEEN_MIN) || age > ONE_HOUR) {
             activeCalls.delete(callSid);
             cleaned++;
         }
     });
     
     if (cleaned > 0) {
-        console.log(`🧹 Cleaned ${cleaned} stale active calls. Remaining: ${activeCalls.size}`);
+        console.log(`🧹 Cleaned ${cleaned} calls. Active: ${activeCalls.size}`);
     }
-}, 5 * 60 * 1000); // Every 5 minutes
+}, 2 * 60 * 1000); // Every 2 minutes
 
 // Clean up old recordings references (older than 24 hours)
 setInterval(() => {
@@ -765,13 +771,13 @@ function broadcastCallStatus(callSid, status, duration, recordingUrl) {
     let sent = 0;
     wsClients.forEach((clientData, ws) => {
         if (ws.readyState === WebSocket.OPEN) {
-            // Only send to clients subscribed to this call OR not subscribed to anything
-            if (!clientData.subscribedCallSid || clientData.subscribedCallSid === callSid) {
+            // OPTIMIZED: Only send to the specific teacher subscribed to THIS call
+            // Plus admin users who may be monitoring
+            if (clientData.subscribedCallSid === callSid || clientData.userType === 'admin') {
                 try {
                     ws.send(message);
                     sent++;
                 } catch (e) {
-                    // Remove dead connection
                     wsClients.delete(ws);
                 }
             }
@@ -2415,11 +2421,7 @@ function broadcastVideoEvent(roomName, eventType, data) {
 app.post('/make-call', async (req, res) => {
     const { to, name } = req.body;
     
-    console.log('\n' + '='.repeat(50));
-    console.log('📞 INITIATING CALL');
-    console.log('   To:', to);
-    console.log('   Name:', name);
-    console.log('='.repeat(50));
+    console.log(`📞 CALL: ${name} → ${to}`);
     
     if (!to) {
         return res.status(400).json({ success: false, error: 'Phone number required' });
@@ -2854,7 +2856,10 @@ app.get('/recording-audio/:callSid', async (req, res) => {
 app.post('/webhooks/call-status', (req, res) => {
     const { CallSid, CallStatus, CallDuration, RecordingUrl } = req.body;
     
-    console.log('📡 WEBHOOK:', CallStatus, 'for:', CallSid);
+    // Only log terminal/important statuses to reduce log flood with 200+ concurrent calls
+    if (['completed', 'busy', 'no-answer', 'failed', 'canceled'].includes(CallStatus)) {
+        console.log('📡 WEBHOOK:', CallStatus, 'for:', CallSid, CallDuration ? `(${CallDuration}s)` : '');
+    }
     
     const cachedCall = activeCalls.get(CallSid);
     let duration = parseInt(CallDuration) || 0;
@@ -2898,12 +2903,7 @@ app.post('/webhooks/call-status', (req, res) => {
 app.post('/webhooks/voice-incoming', async (req, res) => {
     const { CallSid, From, To, CallStatus, Direction } = req.body;
     
-    console.log('\n' + '='.repeat(60));
-    console.log('📞 INCOMING CALL RECEIVED');
-    console.log('   CallSid:', CallSid);
-    console.log('   From:', From);
-    console.log('   To:', To);
-    console.log('='.repeat(60));
+    console.log('📞 INCOMING CALL:', From, '→', To, 'SID:', CallSid);
     
     // STEP 1: Store call in Map
     const confName = `inbound_${CallSid}`;

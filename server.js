@@ -145,7 +145,7 @@ if (config.mongoUri) {
     // ================================================================
     // ULTRA-RELIABLE MONGODB CONNECTION - NEVER SLEEP, NEVER DISCONNECT
     // 5 LAYERS OF PROTECTION:
-    //   Layer 1: Aggressive connection options (heartbeat, keepAlive, retry)
+    //   Layer 1: Aggressive connection options (heartbeat, pool, retry)
     //   Layer 2: Auto-reconnect on disconnect event
     //   Layer 3: Keep-alive ping every 2 minutes (prevents Atlas pause)
     //   Layer 4: Deep health check every 30 seconds (detects zombie connections)
@@ -179,10 +179,6 @@ if (config.mongoUri) {
             
             // Network
             family: 4,                 // IPv4 only - more reliable
-            
-            // Keep TCP connection alive at OS level
-            keepAlive: true,
-            keepAliveInitialDelay: 30000,  // TCP keepAlive ping every 30s
             
             // Buffer commands while reconnecting (don't lose writes!)
             bufferCommands: true,

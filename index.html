@@ -2471,6 +2471,7 @@
             const [students, setStudents] = useState([]);
             const [callHistory, setCallHistory] = useState([]);
             const [teachers, setTeachers] = useState([]);
+            const [teamleads, setTeamleads] = useState([]);
             const [conversations, setConversations] = useState([]);
             const [smsMessages, setSmsMessages] = useState([]);
             const [dataLoaded, setDataLoaded] = useState(false);
@@ -2515,6 +2516,18 @@
                             }));
                             setTeachers(transformedTeachers);
                             console.log('   Teachers loaded:', transformedTeachers.length);
+                        }
+                        
+                        // Load team leads
+                        const teamleadsRes = await fetch(`${BACKEND_URL}/api/teamleads`);
+                        const teamleadsData = await teamleadsRes.json();
+                        if (teamleadsData.success) {
+                            const transformedTeamleads = (teamleadsData.teamleads || []).map(t => ({
+                                ...t,
+                                id: t._id || t.id
+                            }));
+                            setTeamleads(transformedTeamleads);
+                            console.log('   Team leads loaded:', transformedTeamleads.length);
                         }
                         
                         // Load call history
@@ -2688,6 +2701,44 @@
                 }
             };
             
+            // Team Lead CRUD functions
+            const addTeamLead = async (teamleadData) => {
+                try {
+                    const res = await fetch(`${BACKEND_URL}/api/teamleads`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify(teamleadData)
+                    });
+                    const data = await res.json();
+                    if (data.success) {
+                        const newTL = { ...data.teamlead, id: data.teamlead._id || data.teamlead.id };
+                        setTeamleads(prev => [newTL, ...prev]);
+                        return { success: true, teamlead: newTL };
+                    }
+                    return { success: false, error: data.error };
+                } catch (err) {
+                    console.error('Add team lead error:', err);
+                    return { success: false, error: 'Failed to add team lead' };
+                }
+            };
+            
+            const deleteTeamLead = async (id) => {
+                try {
+                    const res = await fetch(`${BACKEND_URL}/api/teamleads/${id}`, {
+                        method: 'DELETE'
+                    });
+                    const data = await res.json();
+                    if (data.success) {
+                        setTeamleads(prev => prev.filter(t => t.id !== id && t._id !== id));
+                        return { success: true };
+                    }
+                    return { success: false, error: data.error };
+                } catch (err) {
+                    console.error('Delete team lead error:', err);
+                    return { success: false, error: 'Failed to delete team lead' };
+                }
+            };
+            
             // API-backed call history
             const addCallToHistoryAPI = async (callData) => {
                 try {
@@ -2771,6 +2822,10 @@
                         addTeacher={addTeacher}
                         updateTeacher={updateTeacher}
                         deleteTeacher={deleteTeacher}
+                        teamleads={teamleads}
+                        setTeamleads={setTeamleads}
+                        addTeamLead={addTeamLead}
+                        deleteTeamLead={deleteTeamLead}
                         addCallToHistoryAPI={addCallToHistoryAPI}
                         handleDeleteHistory={handleDeleteHistory}
                         darkMode={darkMode}
@@ -2799,8 +2854,11 @@
             const [adminPassword, setAdminPassword] = useState('');
             const [teacherEmail, setTeacherEmail] = useState('');
             const [teacherPassword, setTeacherPassword] = useState('');
+            const [teamleadEmail, setTeamleadEmail] = useState('');
+            const [teamleadPassword, setTeamleadPassword] = useState('');
             const [isAdminPasswordVisible, setIsAdminPasswordVisible] = useState(false);
             const [isTeacherPasswordVisible, setIsTeacherPasswordVisible] = useState(false);
+            const [isTeamleadPasswordVisible, setIsTeamleadPasswordVisible] = useState(false);
             const [isLoading, setIsLoading] = useState(false);
 
             const handleAdminLogin = async () => {
@@ -2882,6 +2940,32 @@
                 setIsLoading(false);
             };
 
+            const handleTeamleadLogin = async () => {
+                if (!teamleadEmail || !teamleadPassword) {
+                    addToast('Please enter email and password!', 'error');
+                    return;
+                }
+                setIsLoading(true);
+                try {
+                    const response = await fetch(`${BACKEND_URL}/api/auth/login`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ email: teamleadEmail, password: teamleadPassword, type: 'teamlead' })
+                    });
+                    const data = await response.json();
+                    if (data.success) {
+                        onLogin(data.user);
+                        addToast(`Welcome back, ${data.user.name}!`, 'success');
+                    } else {
+                        addToast(data.error || 'Invalid credentials!', 'error');
+                    }
+                } catch (err) {
+                    console.error('Login error:', err);
+                    addToast('Login failed. Please try again.', 'error');
+                }
+                setIsLoading(false);
+            };
+
             return (
                 <div className="min-h-screen bg-gradient-to-br from-indigo-50 via-purple-50 to-pink-50 flex items-center justify-center p-4">
                     <div className="w-full max-w-md bg-white rounded-3xl shadow-2xl p-8 lg:p-12">
@@ -2893,9 +2977,10 @@
                             <p className="text-slate-500">Professional Calling System</p>
                         </div>
                         
-                        <div className="grid grid-cols-2 gap-2 bg-slate-100 p-1.5 rounded-xl mb-6">
-                            <button onClick={() => setActiveTab('admin')} className={`px-4 py-3 text-sm font-bold rounded-lg transition-colors ${activeTab === 'admin' ? 'bg-white shadow text-indigo-600' : 'text-slate-600'}`}>Administrator</button>
-                            <button onClick={() => setActiveTab('teacher')} className={`px-4 py-3 text-sm font-bold rounded-lg transition-colors ${activeTab === 'teacher' ? 'bg-white shadow text-indigo-600' : 'text-slate-600'}`}>Teacher</button>
+                        <div className="grid grid-cols-3 gap-1 bg-slate-100 p-1.5 rounded-xl mb-6">
+                            <button onClick={() => setActiveTab('admin')} className={`px-3 py-3 text-xs font-bold rounded-lg transition-colors ${activeTab === 'admin' ? 'bg-white shadow text-indigo-600' : 'text-slate-600'}`}>Admin</button>
+                            <button onClick={() => setActiveTab('teacher')} className={`px-3 py-3 text-xs font-bold rounded-lg transition-colors ${activeTab === 'teacher' ? 'bg-white shadow text-indigo-600' : 'text-slate-600'}`}>Teacher</button>
+                            <button onClick={() => setActiveTab('teamlead')} className={`px-3 py-3 text-xs font-bold rounded-lg transition-colors ${activeTab === 'teamlead' ? 'bg-white shadow text-emerald-600' : 'text-slate-600'}`}>Team Lead</button>
                         </div>
 
                         {activeTab === 'admin' ? (
@@ -2917,7 +3002,7 @@
                                     {isLoading ? <><div className="animate-spin rounded-full h-5 w-5 border-b-2 border-white"></div> Logging in...</> : 'Login as Administrator'}
                                 </button>
                             </div>
-                        ) : (
+                        ) : activeTab === 'teacher' ? (
                             <div className="space-y-4">
                                 <div>
                                      <label className="text-sm font-medium text-slate-600 mb-1 block flex items-center gap-2"><Icons.Mail className="w-4 h-4"/> Email</label>
@@ -2937,7 +3022,27 @@
                                 </button>
                                 <p className="text-xs text-slate-400 text-center">Teachers must be added by admin first</p>
                             </div>
-                        )}
+                        ) : activeTab === 'teamlead' ? (
+                            <div className="space-y-4">
+                                <div>
+                                     <label className="text-sm font-medium text-slate-600 mb-1 block flex items-center gap-2"><Icons.Mail className="w-4 h-4"/> Email</label>
+                                     <input type="email" value={teamleadEmail} onChange={e => setTeamleadEmail(e.target.value)} className="w-full p-3 border border-slate-300 rounded-lg focus:ring-2 focus:ring-emerald-500 focus:border-emerald-500 outline-none" placeholder="teamlead@example.com"/>
+                                </div>
+                                <div>
+                                    <label className="text-sm font-medium text-slate-600 mb-1 block flex items-center gap-2"><Icons.LockClosed className="w-4 h-4"/> Password</label>
+                                    <div className="relative">
+                                        <input type={isTeamleadPasswordVisible ? 'text' : 'password'} value={teamleadPassword} onChange={e => setTeamleadPassword(e.target.value)} onKeyPress={e => e.key === 'Enter' && handleTeamleadLogin()} className="w-full p-3 pr-10 border border-slate-300 rounded-lg focus:ring-2 focus:ring-emerald-500 focus:border-emerald-500 outline-none" placeholder="Enter password"/>
+                                        <button type="button" onClick={() => setIsTeamleadPasswordVisible(prev => !prev)} className="absolute inset-y-0 right-0 flex items-center pr-3 text-slate-400 hover:text-slate-600">
+                                            {isTeamleadPasswordVisible ? <Icons.EyeSlash className="w-5 h-5"/> : <Icons.Eye className="w-5 h-5"/>}
+                                        </button>
+                                    </div>
+                                </div>
+                                <button onClick={handleTeamleadLogin} disabled={isLoading} className="w-full bg-gradient-to-r from-emerald-500 to-teal-500 text-white font-bold py-3 px-4 rounded-lg hover:opacity-90 transition-opacity disabled:opacity-50 flex items-center justify-center gap-2">
+                                    {isLoading ? <><div className="animate-spin rounded-full h-5 w-5 border-b-2 border-white"></div> Logging in...</> : 'Login as Team Lead'}
+                                </button>
+                                <p className="text-xs text-slate-400 text-center">Team leads must be added by admin first</p>
+                            </div>
+                        ) : null}
                     </div>
                 </div>
             );
@@ -2962,7 +3067,8 @@
                     <div className="fixed top-6 left-1/2 -translate-x-1/2 z-50 w-full max-w-sm p-4">
                        <div className="bg-white rounded-2xl shadow-2xl p-6 text-center animate-fade-in">
                            <div className="flex justify-between items-center mb-2">
-                                {/* Noise Cancellation Toggle Button */}
+                                {/* Noise Cancellation Toggle Button - hide for team lead */}
+                                {user.type !== 'teamlead' ? (
                                 <button 
                                     onClick={onToggleNoiseCancel}
                                     className={`flex items-center gap-1.5 px-2.5 py-1 rounded-full shadow-sm transition-all duration-300 ${
@@ -2990,11 +3096,14 @@
                                         </>
                                     )}
                                 </button>
-                                <span className="text-xs font-bold text-slate-400 bg-slate-100 px-2 py-0.5 rounded-full">LIVE</span>
+                                ) : (
+                                    <span className="text-xs font-bold text-amber-500 bg-amber-50 px-2.5 py-1 rounded-full">🤖 AUTO</span>
+                                )}
+                                <span className="text-xs font-bold text-slate-400 bg-slate-100 px-2 py-0.5 rounded-full">{user.type === 'teamlead' ? 'REMINDER' : 'LIVE'}</span>
                            </div>
                            <FloatingCallAvatar />
                             <h2 className="text-3xl font-bold text-slate-800 mt-4">{user.type === 'admin' ? formatPhoneNumber(student?.phone) : student?.name}</h2>
-                            <p className="text-slate-500 text-md">{user.type === 'admin' ? `to ${student?.name}` : 'Active Call'} - {user.name}</p>
+                            <p className="text-slate-500 text-md">{user.type === 'teamlead' ? `🤖 Auto Reminder to ${student?.name}` : user.type === 'admin' ? `to ${student?.name}` : 'Active Call'} - {user.name}</p>
 
                             <div className="my-6 h-10 flex flex-col items-center justify-center">
                                 {(status === 'dialing' || status === 'active') ? (
@@ -3015,6 +3124,18 @@
                             </div>
                            
                             <div className="space-y-6">
+                                {user.type === 'teamlead' ? (
+                                    /* Team Lead: Show auto-reminder status only - no call controls */
+                                    <div className="text-center py-4">
+                                        <div className="inline-flex items-center gap-2 px-4 py-2 bg-amber-50 border border-amber-200 rounded-full mb-3">
+                                            <span className="text-lg">🤖</span>
+                                            <span className="text-amber-700 font-semibold text-sm">
+                                                {status === 'dialing' ? 'Calling student...' : status === 'active' ? 'Playing reminder message...' : 'Processing...'}
+                                            </span>
+                                        </div>
+                                        <p className="text-slate-400 text-xs">Auto-hangs up after message completes</p>
+                                    </div>
+                                ) : (
                                 <div className="grid grid-cols-4 gap-2 text-center text-slate-700">
                                     <div className="flex flex-col items-center">
                                         <button onClick={onToggleMute} disabled={!isMicrophoneReady} className={`w-16 h-16 flex items-center justify-center rounded-full transition-colors ${isMuted ? 'bg-amber-500 text-white' : 'bg-slate-200 text-slate-800 hover:bg-slate-300'} disabled:opacity-50 disabled:cursor-not-allowed`}>
@@ -3050,6 +3171,7 @@
                                         )}
                                     </div>
                                 </div>
+                                )}
                                 
                                 <button onClick={onHangup} className="w-full flex items-center justify-center gap-3 py-4 bg-red-500 text-white font-bold rounded-2xl hover:bg-red-600 transition-colors shadow-lg shadow-red-500/30">
                                     <Icons.Phone className="w-6 h-6" style={{ transform: 'rotate(135deg)' }}/>
@@ -3070,7 +3192,7 @@
 
         // --- Dashboard Component (The main logged-in view) ---
         const Dashboard = (props) => {
-            const { user, onLogout, students, setStudents, callHistory, setCallHistory, teachers, setTeachers, addToast, setConfirmation, setPrompt, dbStatus, addStudent: addStudentAPI, updateStudent: updateStudentAPI, deleteStudent: deleteStudentAPI, addTeacher: addTeacherAPI, updateTeacher: updateTeacherAPI, deleteTeacher: deleteTeacherAPI, addCallToHistoryAPI, handleDeleteHistory, conversations, setConversations, smsMessages, setSmsMessages, darkMode, toggleDarkMode } = props;
+            const { user, onLogout, students, setStudents, callHistory, setCallHistory, teachers, setTeachers, teamleads, setTeamleads, addTeamLead: addTeamLeadAPI, deleteTeamLead: deleteTeamLeadAPI, addToast, setConfirmation, setPrompt, dbStatus, addStudent: addStudentAPI, updateStudent: updateStudentAPI, deleteStudent: deleteStudentAPI, addTeacher: addTeacherAPI, updateTeacher: updateTeacherAPI, deleteTeacher: deleteTeacherAPI, addCallToHistoryAPI, handleDeleteHistory, conversations, setConversations, smsMessages, setSmsMessages, darkMode, toggleDarkMode } = props;
             const [activeSection, setActiveSection] = useState(user.type === 'admin' ? 'overview' : 'students');
             const [isSidebarOpen, setSidebarOpen] = useState(false);
             
@@ -3681,6 +3803,54 @@
                 setIsIncomingMuted(newMuted);
             }, [isIncomingMuted]);
 
+            const initiateReminderCall = useCallback(async (student) => {
+                if (!student?.phone) {
+                    addToast('Student has no phone number', 'error');
+                    return;
+                }
+                
+                setCallState(s => ({
+                    ...s,
+                    status: 'dialing',
+                    student: student,
+                    isMuted: false,
+                    isHoldActive: false,
+                    duration: 0,
+                    finishReason: ''
+                }));
+                setShowCallModal(true);
+                callEndedRef.current = false;
+                
+                try {
+                    const response = await fetch(`${BACKEND_URL}/make-reminder-call`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({
+                            to: student.phone,
+                            studentName: student.name,
+                            callerName: user.name
+                        })
+                    });
+                    
+                    const data = await response.json();
+                    
+                    if (data.success) {
+                        setCallState(s => ({ ...s, sid: data.callSid }));
+                        wsManager.subscribeToCall(data.callSid);
+                        addToast(`Reminder call to ${student.name} initiated`, 'success');
+                    } else {
+                        addToast(data.error || 'Failed to make reminder call', 'error');
+                        setCallState(s => ({ ...s, status: 'idle' }));
+                        setShowCallModal(false);
+                    }
+                } catch (error) {
+                    console.error('Reminder call error:', error);
+                    addToast('Failed to connect. Please try again.', 'error');
+                    setCallState(s => ({ ...s, status: 'idle' }));
+                    setShowCallModal(false);
+                }
+            }, [user.name, addToast]);
+            
             const initiateCall = useCallback(async (student) => {
                 if (!student || callStateRef.current.status !== 'idle') {
                     addToast('Cannot start a new call while another is active.', 'error');
@@ -3949,7 +4119,7 @@
                 messages: { title: 'Messages', subtitle: 'Send and receive SMS messages' },
                 history: { title: 'Call History', subtitle: 'View all past calls' },
                 analytics: { title: 'Analytics & Reports', subtitle: 'Performance metrics' },
-                users: { title: 'User Management', subtitle: 'Manage teacher accounts' },
+                users: { title: 'User Management', subtitle: 'Manage teachers and team leads' },
             };
 
             const renderSection = () => {
@@ -3960,7 +4130,7 @@
                             addStudentAPI={addStudentAPI}
                             updateStudentAPI={updateStudentAPI}
                             deleteStudentAPI={deleteStudentAPI}
-                            onInitiateCall={initiateCall} addToast={addToast} setConfirmation={setConfirmation}
+                            onInitiateCall={user.type === 'teamlead' ? initiateReminderCall : initiateCall} addToast={addToast} setConfirmation={setConfirmation}
                             darkMode={darkMode}
                         />;
                     case 'calls':
@@ -4008,7 +4178,7 @@
                     case 'analytics':
                          return user.type === 'admin' ? <AnalyticsSection callHistory={callHistory} darkMode={darkMode} /> : null;
                     case 'users':
-                        return user.type === 'admin' ? <UsersSection teachers={teachers} addTeacherAPI={addTeacherAPI} deleteTeacherAPI={deleteTeacherAPI} addToast={addToast} setConfirmation={setConfirmation} setPrompt={setPrompt} darkMode={darkMode} /> : null;
+                        return user.type === 'admin' ? <UsersSection teachers={teachers} addTeacherAPI={addTeacherAPI} deleteTeacherAPI={deleteTeacherAPI} teamleads={teamleads || []} addTeamLeadAPI={addTeamLeadAPI} deleteTeamLeadAPI={deleteTeamLeadAPI} addToast={addToast} setConfirmation={setConfirmation} setPrompt={setPrompt} darkMode={darkMode} /> : null;
                     case 'overview':
                     default:
                          return user.type === 'admin' ? <OverviewSection students={students} callHistory={callHistory} user={user} darkMode={darkMode} /> : null;
@@ -4273,9 +4443,9 @@
                         <nav className="space-y-2">
                             {user.type === 'admin' && <NavItem section="overview" icon={<Icons.Dashboard className="w-5 h-5"/>} label="Overview" />}
                             <NavItem section="students" icon={<Icons.Students className="w-5 h-5"/>} label="Students" />
-                            <NavItem section="calls" icon={<Icons.CallCenter className="w-5 h-5"/>} label="Call Center" />
-                            <NavItem section="video" icon={<Icons.Video className="w-5 h-5"/>} label="Video Call" />
-                            <NavItem section="messages" icon={<Icons.Messages className="w-5 h-5"/>} label="Messages" />
+                            {user.type !== 'teamlead' && <NavItem section="calls" icon={<Icons.CallCenter className="w-5 h-5"/>} label="Call Center" />}
+                            {user.type !== 'teamlead' && <NavItem section="video" icon={<Icons.Video className="w-5 h-5"/>} label="Video Call" />}
+                            {user.type !== 'teamlead' && <NavItem section="messages" icon={<Icons.Messages className="w-5 h-5"/>} label="Messages" />}
                             <NavItem section="history" icon={<Icons.History className="w-5 h-5"/>} label="History" />
                             {user.type === 'admin' && <NavItem section="analytics" icon={<Icons.Analytics className="w-5 h-5"/>} label="Analytics" />}
                             {user.type === 'admin' && <NavItem section="users" icon={<Icons.Users className="w-5 h-5"/>} label="Users" />}
@@ -4375,8 +4545,8 @@
                                         <div className={darkMode ? 'text-slate-300' : 'text-slate-600'}>{user.type === 'admin' ? student.phone : 'Phone Hidden'}</div>
                                         <div className={`hidden md:block ${darkMode ? 'text-slate-300' : 'text-slate-600'}`}>{student.email}</div>
                                         <div className="flex items-center justify-end gap-2">
-                                             <button onClick={() => onInitiateCall(student)} className={`p-2 rounded-full transition-colors ${darkMode ? 'text-green-400 bg-green-900/50 hover:bg-green-800/50' : 'text-green-600 bg-green-100 hover:bg-green-200'}`} title="Call Student">
-                                                <Icons.CallCenter className="w-5 h-5" />
+                                             <button onClick={() => onInitiateCall(student)} className={`p-2 rounded-full transition-colors ${user.type === 'teamlead' ? (darkMode ? 'text-amber-400 bg-amber-900/50 hover:bg-amber-800/50' : 'text-amber-600 bg-amber-100 hover:bg-amber-200') : (darkMode ? 'text-green-400 bg-green-900/50 hover:bg-green-800/50' : 'text-green-600 bg-green-100 hover:bg-green-200')}`} title={user.type === 'teamlead' ? 'Send Reminder' : 'Call Student'}>
+                                                {user.type === 'teamlead' ? <span className="text-sm">🤖</span> : <Icons.CallCenter className="w-5 h-5" />}
                                             </button>
                                             {user.type === 'admin' && (
                                                 <>
@@ -5581,49 +5751,83 @@
             );
         };
 
-        const UsersSection = ({ teachers, addTeacherAPI, deleteTeacherAPI, addToast, setConfirmation, setPrompt }) => {
+        const UsersSection = ({ teachers, addTeacherAPI, deleteTeacherAPI, teamleads = [], addTeamLeadAPI, deleteTeamLeadAPI, addToast, setConfirmation, setPrompt }) => {
+            const [activeUserTab, setActiveUserTab] = useState('teachers');
             const [searchTerm, setSearchTerm] = useState('');
             const [showAddModal, setShowAddModal] = useState(false);
-            const [newTeacherName, setNewTeacherName] = useState('');
-            const [newTeacherEmail, setNewTeacherEmail] = useState('');
-            const [newTeacherPassword, setNewTeacherPassword] = useState('');
+            const [newName, setNewName] = useState('');
+            const [newEmail, setNewEmail] = useState('');
+            const [newPassword, setNewPassword] = useState('');
             const [isSaving, setIsSaving] = useState(false);
+            
+            // Backward compat aliases
+            const [newTeacherName, setNewTeacherName] = [newName, setNewName];
+            const [newTeacherEmail, setNewTeacherEmail] = [newEmail, setNewEmail];
+            const [newTeacherPassword, setNewTeacherPassword] = [newPassword, setNewPassword];
 
             const filteredTeachers = useMemo(() => teachers.filter(t =>
                 t.name.toLowerCase().includes(searchTerm.toLowerCase())
             ), [teachers, searchTerm]);
+            
+            const filteredTeamLeads = useMemo(() => (teamleads || []).filter(t =>
+                t.name.toLowerCase().includes(searchTerm.toLowerCase())
+            ), [teamleads, searchTerm]);
 
-            const handleAddTeacher = async () => {
-                if (!newTeacherName.trim()) {
-                    addToast('Teacher name is required.', 'error');
+            const handleAddUser = async () => {
+                const isTeamLead = activeUserTab === 'teamleads';
+                const label = isTeamLead ? 'Team Lead' : 'Teacher';
+                
+                if (!newName.trim()) {
+                    addToast(`${label} name is required.`, 'error');
                     return;
                 }
-                if (!newTeacherEmail.trim()) {
-                    addToast('Teacher email is required.', 'error');
+                if (!newEmail.trim()) {
+                    addToast(`${label} email is required.`, 'error');
                     return;
                 }
-                if (!newTeacherPassword || newTeacherPassword.length < 6) {
+                if (!newPassword || newPassword.length < 6) {
                     addToast('Password must be at least 6 characters.', 'error');
                     return;
                 }
                 
                 setIsSaving(true);
-                const result = await addTeacherAPI({
-                    name: newTeacherName.trim(),
-                    email: newTeacherEmail.trim(),
-                    password: newTeacherPassword
+                const apiFunc = isTeamLead ? addTeamLeadAPI : addTeacherAPI;
+                const result = await apiFunc({
+                    name: newName.trim(),
+                    email: newEmail.trim(),
+                    password: newPassword
                 });
                 
                 if (result.success) {
-                    addToast(`Teacher "${newTeacherName.trim()}" added successfully.`, 'success');
+                    addToast(`${label} "${newName.trim()}" added successfully.`, 'success');
                     setShowAddModal(false);
-                    setNewTeacherName('');
-                    setNewTeacherEmail('');
-                    setNewTeacherPassword('');
+                    setNewName('');
+                    setNewEmail('');
+                    setNewPassword('');
                 } else {
-                    addToast(result.error || 'Failed to add teacher', 'error');
+                    addToast(result.error || `Failed to add ${label.toLowerCase()}`, 'error');
                 }
                 setIsSaving(false);
+            };
+            
+            const handleAddTeacher = handleAddUser;
+            
+            const handleDeleteUser = (user) => {
+                const isTeamLead = activeUserTab === 'teamleads';
+                const label = isTeamLead ? 'team lead' : 'teacher';
+                setConfirmation({
+                    title: `Delete ${label}?`,
+                    message: `Are you sure you want to delete ${user.name}? This action cannot be undone.`,
+                    onConfirm: async () => {
+                        const deleteFunc = isTeamLead ? deleteTeamLeadAPI : deleteTeacherAPI;
+                        const result = await deleteFunc(user.id || user._id);
+                        if (result.success) {
+                            addToast(`${user.name} deleted successfully.`, 'success');
+                        } else {
+                            addToast(result.error || `Failed to delete ${label}`, 'error');
+                        }
+                    }
+                });
             };
 
             const handleDelete = (teacher) => {
@@ -5644,34 +5848,45 @@
 
             return (
                 <div className="bg-white p-6 rounded-2xl shadow-sm border border-slate-200/80">
+                    {/* Tab buttons - Teachers / Team Leads */}
+                    <div className="flex gap-2 mb-4">
+                        <button onClick={() => { setActiveUserTab('teachers'); setSearchTerm(''); }} className={`px-4 py-2 rounded-lg font-bold text-sm transition-colors ${activeUserTab === 'teachers' ? 'bg-indigo-500 text-white' : 'bg-slate-100 text-slate-600 hover:bg-slate-200'}`}>
+                            👨‍🏫 Teachers ({teachers.length})
+                        </button>
+                        <button onClick={() => { setActiveUserTab('teamleads'); setSearchTerm(''); }} className={`px-4 py-2 rounded-lg font-bold text-sm transition-colors ${activeUserTab === 'teamleads' ? 'bg-emerald-500 text-white' : 'bg-slate-100 text-slate-600 hover:bg-slate-200'}`}>
+                            👥 Team Leads ({(teamleads || []).length})
+                        </button>
+                    </div>
+                    
                     <div className="flex justify-between items-center mb-4 flex-wrap gap-4">
                         <div className="relative flex-1 min-w-[250px]">
-                            <input type="text" placeholder="Search by teacher name..." value={searchTerm} onChange={e => setSearchTerm(e.target.value)} className="w-full p-3 pl-10 border border-slate-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 outline-none" />
+                            <input type="text" placeholder={`Search by ${activeUserTab === 'teamleads' ? 'team lead' : 'teacher'} name...`} value={searchTerm} onChange={e => setSearchTerm(e.target.value)} className="w-full p-3 pl-10 border border-slate-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 outline-none" />
                             <Icons.Search className="absolute left-3 top-1/2 -translate-y-1/2 w-5 h-5 text-slate-400" />
                         </div>
-                        <button onClick={() => setShowAddModal(true)} className="flex items-center gap-2 px-4 py-3 bg-gradient-to-r from-indigo-500 to-violet-500 text-white font-bold rounded-lg hover:opacity-90 transition-opacity">
+                        <button onClick={() => setShowAddModal(true)} className={`flex items-center gap-2 px-4 py-3 text-white font-bold rounded-lg hover:opacity-90 transition-opacity ${activeUserTab === 'teamleads' ? 'bg-gradient-to-r from-emerald-500 to-teal-500' : 'bg-gradient-to-r from-indigo-500 to-violet-500'}`}>
                             <Icons.Plus className="w-5 h-5"/>
-                            Add Teacher
+                            {activeUserTab === 'teamleads' ? 'Add Team Lead' : 'Add Teacher'}
                         </button>
                     </div>
 
-                    {filteredTeachers.length > 0 ? (
+                    {(activeUserTab === 'teamleads' ? filteredTeamLeads : filteredTeachers).length > 0 ? (
                         <div className="space-y-3 custom-scrollbar overflow-y-auto max-h-[65vh] pr-2">
-                            {filteredTeachers.map((teacher, index) => (
-                                <div key={teacher.id || teacher._id} className="bg-slate-50 p-4 rounded-lg border border-slate-200 animate-fade-in" style={{ animationDelay: `${index * 30}ms` }}>
+                            {(activeUserTab === 'teamleads' ? filteredTeamLeads : filteredTeachers).map((person, index) => (
+                                <div key={person.id || person._id} className="bg-slate-50 p-4 rounded-lg border border-slate-200 animate-fade-in" style={{ animationDelay: `${index * 30}ms` }}>
                                     <div className="grid grid-cols-1 md:grid-cols-3 gap-4 items-center">
                                         <div className="flex items-center gap-4">
-                                            <StudentAvatar name={teacher.name} />
+                                            <StudentAvatar name={person.name} />
                                             <div>
-                                                <p className="font-bold text-slate-800">{teacher.name}</p>
-                                                <p className="text-sm text-slate-500">{teacher.email}</p>
+                                                <p className="font-bold text-slate-800">{person.name}</p>
+                                                <p className="text-sm text-slate-500">{person.email}</p>
                                             </div>
                                         </div>
                                         <div className="text-slate-600">
-                                            <p>Added: {teacher.createdAt ? new Date(teacher.createdAt).toLocaleDateString() : 'N/A'}</p>
+                                            <p>Added: {person.createdAt ? new Date(person.createdAt).toLocaleDateString() : 'N/A'}</p>
+                                            {activeUserTab === 'teamleads' && <span className="text-xs bg-emerald-100 text-emerald-700 px-2 py-0.5 rounded-full font-medium">Team Lead</span>}
                                         </div>
                                         <div className="flex items-center justify-end gap-2">
-                                            <button onClick={() => handleDelete(teacher)} className="p-2 text-red-600 bg-red-100 rounded-full hover:bg-red-200 transition-colors" title="Delete Teacher">
+                                            <button onClick={() => handleDeleteUser(person)} className="p-2 text-red-600 bg-red-100 rounded-full hover:bg-red-200 transition-colors" title={`Delete ${activeUserTab === 'teamleads' ? 'Team Lead' : 'Teacher'}`}>
                                                 <Icons.Trash className="w-5 h-5" />
                                             </button>
                                         </div>
@@ -5680,34 +5895,34 @@
                             ))}
                         </div>
                     ) : (
-                         <EmptyState icon={<Icons.Users />} message="No Teachers Found" description={searchTerm ? "Your search returned no results." : "No teachers have been added yet."} action={
-                             <button onClick={() => setShowAddModal(true)} className="px-4 py-2 bg-indigo-500 text-white font-semibold rounded-lg">Add First Teacher</button>
+                         <EmptyState icon={<Icons.Users />} message={activeUserTab === 'teamleads' ? 'No Team Leads Found' : 'No Teachers Found'} description={searchTerm ? "Your search returned no results." : `No ${activeUserTab === 'teamleads' ? 'team leads' : 'teachers'} have been added yet.`} action={
+                             <button onClick={() => setShowAddModal(true)} className="px-4 py-2 bg-indigo-500 text-white font-semibold rounded-lg">{activeUserTab === 'teamleads' ? 'Add First Team Lead' : 'Add First Teacher'}</button>
                          }/>
                     )}
                     
-                    {/* Add Teacher Modal */}
+                    {/* Add User Modal */}
                     {showAddModal && (
                         <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4" onClick={() => setShowAddModal(false)}>
                             <div className="bg-white rounded-2xl shadow-xl w-full max-w-md p-6" onClick={e => e.stopPropagation()}>
                                 <div className="flex justify-between items-center mb-4">
-                                    <h2 className="text-xl font-bold text-slate-800">Add New Teacher</h2>
+                                    <h2 className="text-xl font-bold text-slate-800">{activeUserTab === 'teamleads' ? 'Add New Team Lead' : 'Add New Teacher'}</h2>
                                     <button onClick={() => setShowAddModal(false)} className="text-slate-400 hover:text-slate-600 text-2xl">&times;</button>
                                 </div>
                                 <div className="space-y-4">
                                     <div>
                                         <label className="text-sm font-medium text-slate-600 mb-1 block">Full Name</label>
-                                        <input type="text" value={newTeacherName} onChange={e => setNewTeacherName(e.target.value)} className="w-full p-3 border border-slate-300 rounded-lg focus:ring-2 focus:ring-indigo-500 outline-none" placeholder="Enter teacher name" />
+                                        <input type="text" value={newName} onChange={e => setNewName(e.target.value)} className="w-full p-3 border border-slate-300 rounded-lg focus:ring-2 focus:ring-indigo-500 outline-none" placeholder={`Enter ${activeUserTab === 'teamleads' ? 'team lead' : 'teacher'} name`} />
                                     </div>
                                     <div>
                                         <label className="text-sm font-medium text-slate-600 mb-1 block">Email</label>
-                                        <input type="email" value={newTeacherEmail} onChange={e => setNewTeacherEmail(e.target.value)} className="w-full p-3 border border-slate-300 rounded-lg focus:ring-2 focus:ring-indigo-500 outline-none" placeholder="teacher@example.com" />
+                                        <input type="email" value={newEmail} onChange={e => setNewEmail(e.target.value)} className="w-full p-3 border border-slate-300 rounded-lg focus:ring-2 focus:ring-indigo-500 outline-none" placeholder={activeUserTab === 'teamleads' ? 'teamlead@example.com' : 'teacher@example.com'} />
                                     </div>
                                     <div>
                                         <label className="text-sm font-medium text-slate-600 mb-1 block">Password</label>
-                                        <input type="password" value={newTeacherPassword} onChange={e => setNewTeacherPassword(e.target.value)} className="w-full p-3 border border-slate-300 rounded-lg focus:ring-2 focus:ring-indigo-500 outline-none" placeholder="Minimum 6 characters" />
+                                        <input type="password" value={newPassword} onChange={e => setNewPassword(e.target.value)} className="w-full p-3 border border-slate-300 rounded-lg focus:ring-2 focus:ring-indigo-500 outline-none" placeholder="Minimum 6 characters" />
                                     </div>
-                                    <button onClick={handleAddTeacher} disabled={isSaving} className="w-full bg-gradient-to-r from-indigo-500 to-violet-500 text-white font-bold py-3 px-4 rounded-lg hover:opacity-90 transition-opacity disabled:opacity-50">
-                                        {isSaving ? 'Adding...' : 'Add Teacher'}
+                                    <button onClick={handleAddUser} disabled={isSaving} className={`w-full text-white font-bold py-3 px-4 rounded-lg hover:opacity-90 transition-opacity disabled:opacity-50 ${activeUserTab === 'teamleads' ? 'bg-gradient-to-r from-emerald-500 to-teal-500' : 'bg-gradient-to-r from-indigo-500 to-violet-500'}`}>
+                                        {isSaving ? 'Adding...' : activeUserTab === 'teamleads' ? 'Add Team Lead' : 'Add Teacher'}
                                     </button>
                                 </div>
                             </div>

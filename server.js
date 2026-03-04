@@ -327,7 +327,7 @@ const userSchema = new mongoose.Schema({
     name: { type: String, required: true },
     email: { type: String, required: true, unique: true, lowercase: true },
     password: { type: String, required: true },
-    type: { type: String, enum: ['admin', 'teacher'], default: 'teacher', index: true },
+    type: { type: String, enum: ['admin', 'teacher', 'teamlead'], default: 'teacher', index: true },
     phone: { type: String },
     isActive: { type: Boolean, default: true, index: true },
     createdAt: { type: Date, default: Date.now },
@@ -809,7 +809,7 @@ function broadcastIncomingCall(callData) {
     let sent = 0;
     wsClients.forEach((clientData, ws) => {
         // Only send incoming calls to ADMIN clients
-        if (ws.readyState === WebSocket.OPEN && clientData.userType === 'admin') {
+        if (ws.readyState === WebSocket.OPEN && (clientData.userType === 'admin' || clientData.userType === 'teamlead')) {
             try {
                 ws.send(payload);
                 sent++;
@@ -819,7 +819,7 @@ function broadcastIncomingCall(callData) {
         }
     });
     
-    console.log(`📢 Broadcast incoming call to ${sent} admin client(s)`);
+    console.log(`📢 Broadcast incoming call to ${sent} admin/teamlead client(s)`);
 }
 
 // Broadcast incoming call status update - ADMIN ONLY
@@ -834,7 +834,7 @@ function broadcastIncomingCallStatus(callSid, status, additionalData = {}) {
     
     wsClients.forEach((clientData, ws) => {
         // Only send incoming call status to ADMIN clients
-        if (ws.readyState === WebSocket.OPEN && clientData.userType === 'admin') {
+        if (ws.readyState === WebSocket.OPEN && (clientData.userType === 'admin' || clientData.userType === 'teamlead')) {
             try {
                 ws.send(payload);
             } catch (e) {
@@ -901,10 +901,10 @@ app.post('/api/auth/login', async (req, res) => {
             const teacher = inMemoryTeachers.find(t => 
                 t.email.toLowerCase() === email.toLowerCase() && t.password === password
             );
-            if (teacher && type === 'teacher') {
+            if (teacher && (type === 'teacher' || type === 'teamlead')) {
                 return res.json({
                     success: true,
-                    user: { id: teacher.id, name: teacher.name, email: teacher.email, type: 'teacher' }
+                    user: { id: teacher.id, name: teacher.name, email: teacher.email, type: teacher.type || type }
                 });
             }
             
@@ -1173,6 +1173,179 @@ app.delete('/api/teachers/:id', async (req, res) => {
         res.status(500).json({ success: false, error: 'Failed to delete teacher' });
     }
 });
+
+// ---------------------------------------------------------
+// TEAM LEAD ENDPOINTS
+// ---------------------------------------------------------
+app.get('/api/teamleads', async (req, res) => {
+    try {
+        if (isDbConnected()) {
+            const teamleads = await User.find({ type: 'teamlead', isActive: true })
+                .select('-password')
+                .lean();
+            return res.json({ success: true, teamleads });
+        }
+        const teamleads = inMemoryTeachers.filter(t => t.type === 'teamlead').map(({ password, ...t }) => t);
+        res.json({ success: true, teamleads });
+    } catch (error) {
+        res.status(500).json({ success: false, error: error.message });
+    }
+});
+
+app.post('/api/teamleads', async (req, res) => {
+    const { name, email, password, phone } = req.body;
+    if (!name || !email || !password) {
+        return res.status(400).json({ success: false, error: 'Name, email, and password are required' });
+    }
+    try {
+        if (isDbConnected()) {
+            const hashedPassword = await bcrypt.hash(password, 10);
+            const teamlead = await User.create({
+                name, email, password: hashedPassword, phone: phone || '',
+                type: 'teamlead'
+            });
+            invalidateCache('teamleads');
+            return res.json({ success: true, teamlead: { id: teamlead._id, name, email, phone: phone || '', type: 'teamlead' } });
+        }
+        const teamlead = { id: 'tl-' + Date.now(), name, email, password, phone: phone || '', type: 'teamlead' };
+        inMemoryTeachers.push(teamlead);
+        res.json({ success: true, teamlead: { id: teamlead.id, name, email, phone: phone || '', type: 'teamlead' } });
+    } catch (error) {
+        res.status(500).json({ success: false, error: error.message });
+    }
+});
+
+app.put('/api/teamleads/:id', async (req, res) => {
+    const { id } = req.params;
+    const { name, email, phone, password } = req.body;
+    try {
+        if (isDbConnected()) {
+            const updateData = { name, email, phone };
+            if (password) updateData.password = await bcrypt.hash(password, 10);
+            const teamlead = await User.findByIdAndUpdate(id, updateData, { new: true }).select('-password');
+            invalidateCache('teamleads');
+            return res.json({ success: true, teamlead });
+        }
+        const index = inMemoryTeachers.findIndex(t => t.id === id && t.type === 'teamlead');
+        if (index === -1) return res.status(404).json({ success: false, error: 'Team lead not found' });
+        inMemoryTeachers[index] = { ...inMemoryTeachers[index], name, email, phone };
+        if (password) inMemoryTeachers[index].password = password;
+        const { password: _, ...teamleadWithoutPassword } = inMemoryTeachers[index];
+        res.json({ success: true, teamlead: teamleadWithoutPassword });
+    } catch (error) {
+        res.status(500).json({ success: false, error: error.message });
+    }
+});
+
+app.delete('/api/teamleads/:id', async (req, res) => {
+    const { id } = req.params;
+    try {
+        if (isDbConnected()) {
+            await User.findByIdAndUpdate(id, { isActive: false });
+            invalidateCache('teamleads');
+            return res.json({ success: true });
+        }
+        inMemoryTeachers = inMemoryTeachers.filter(t => !(t.id === id && t.type === 'teamlead'));
+        res.json({ success: true });
+    } catch (error) {
+        res.status(500).json({ success: false, error: error.message });
+    }
+});
+
+// ---------------------------------------------------------
+// AUTOMATED REMINDER CALL (Team Lead Feature)
+// ---------------------------------------------------------
+app.post('/make-reminder-call', async (req, res) => {
+    const { to, studentName, callerName } = req.body;
+    
+    console.log('🤖 Reminder call request:', { to, studentName, callerName });
+    
+    if (!to) {
+        return res.status(400).json({ success: false, error: 'Phone number required' });
+    }
+    
+    if (!twilioClient) {
+        return res.status(500).json({ success: false, error: 'Twilio not configured' });
+    }
+    
+    try {
+        const call = await twilioClient.calls.create({
+            to: to,
+            from: config.twilio.phoneNumber,
+            url: `${config.publicUrl}/twiml/reminder-message`,
+            method: 'POST',
+            statusCallback: `${config.publicUrl}/webhooks/call-status`,
+            statusCallbackMethod: 'POST',
+            statusCallbackEvent: ['initiated', 'ringing', 'answered', 'completed'],
+            timeout: 30,
+            record: false  // No recording for reminder calls
+        });
+        
+        // Track in activeCalls
+        activeCalls.set(call.sid, {
+            sid: call.sid,
+            to: to,
+            studentName: studentName || 'Unknown',
+            callerName: callerName || 'Team Lead',
+            status: 'queued',
+            startTime: Date.now(),
+            type: 'reminder'  // Mark as reminder call
+        });
+        
+        console.log('✅ Reminder call initiated:', call.sid);
+        
+        // Save reminder call to history
+        const reminderHistoryEntry = {
+            callSid: call.sid,
+            studentName: studentName || 'Unknown',
+            studentPhone: to,
+            teacherName: callerName || 'Team Lead',
+            type: 'outbound',
+            callType: 'reminder',
+            status: 'Initiated',
+            timestamp: new Date().toISOString(),
+            duration: 0
+        };
+        
+        if (isDbConnected()) {
+            try {
+                await CallHistory.create(reminderHistoryEntry);
+            } catch (e) {
+                console.log('Reminder history save deferred:', e.message);
+            }
+        }
+        inMemoryCallHistory.unshift(reminderHistoryEntry);
+        
+        res.json({
+            success: true,
+            callSid: call.sid,
+            message: 'Reminder call initiated'
+        });
+        
+    } catch (error) {
+        console.error('❌ Reminder call error:', error.message);
+        res.status(500).json({ success: false, error: error.message });
+    }
+});
+
+// TwiML for automated reminder message
+app.post('/twiml/reminder-message', (req, res) => {
+    console.log('🤖 Serving reminder TwiML');
+    
+    const twiml = `<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+    <Pause length="1"/>
+    <Say voice="Polly.Joanna" language="en-US" rate="95%">
+        Assalamu Alaikum, this is a reminder from Lets Learn Quran Academy. Your Quran class is scheduled today. Please join on time. JazakAllah Khair.
+    </Say>
+    <Pause length="1"/>
+    <Hangup/>
+</Response>`;
+    
+    res.type('text/xml');
+    res.send(twiml);
+});
+
 
 // ---------------------------------------------------------
 // CALL HISTORY API

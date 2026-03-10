@@ -3632,12 +3632,59 @@
                 // Show toast
                 addToast(toastMessage, toastType);
                 console.log('   ✅ handleCallEnd completed');
+                
+                // CRITICAL: Auto-reset to 'idle' after 2 seconds so user can make another call
+                // Without this, status stays 'finished' forever and blocks all future calls
+                setTimeout(() => {
+                    setCallState(s => {
+                        if (s.status === 'finished') {
+                            callEndedRef.current = false;
+                            callStateRef.current = { ...s, status: 'idle', student: null, sid: null, duration: 0, isMuted: false, isHoldActive: false, isMicrophoneReady: false, finishReason: '' };
+                            return callStateRef.current;
+                        }
+                        return s;
+                    });
+                }, 2000);
             }, [addToast, callCleanup, user.name, user.type, addCallToHistory]);
 
             // Store handleCallEnd in ref so WebSocket can call it
             useEffect(() => {
                 handleCallEndRef.current = handleCallEnd;
             }, [handleCallEnd]);
+
+            // STUCK CALL DETECTOR - Force-reset to 'idle' if call state gets stuck
+            // This prevents "Cannot start a new call" error permanently blocking the user
+            useEffect(() => {
+                if (callState.status === 'idle') return; // Nothing to monitor
+                
+                let timeoutMs;
+                switch (callState.status) {
+                    case 'dialing':   timeoutMs = 50000; break;  // 50s - should connect or timeout by then
+                    case 'finishing': timeoutMs = 15000; break;  // 15s - finishing shouldn't take long
+                    case 'finished':  timeoutMs = 3000;  break;  // 3s  - should auto-reset quickly
+                    case 'active':    timeoutMs = 7200000; break; // 2hr - safety net for very long calls
+                    default:          timeoutMs = 60000; break;  // 60s - unknown state
+                }
+                
+                const stuckTimer = setTimeout(() => {
+                    console.log(`🚨 STUCK CALL DETECTOR: State '${callState.status}' for ${timeoutMs/1000}s - force resetting to idle`);
+                    
+                    // Clean up everything
+                    callEndedRef.current = false;
+                    if (twilioVoiceManager.activeCall) {
+                        try { twilioVoiceManager.hangup(); } catch(e) {}
+                    }
+                    wsManager.unsubscribe();
+                    audioManager.stop();
+                    setShowCallModal(false);
+                    
+                    const resetState = { status: 'idle', student: null, sid: null, duration: 0, isMuted: false, isHoldActive: false, isMicrophoneReady: false, volume: 1, finishReason: '' };
+                    callStateRef.current = resetState;
+                    setCallState(resetState);
+                }, timeoutMs);
+                
+                return () => clearTimeout(stuckTimer);
+            }, [callState.status]);
 
             const requestCallEnd = useCallback(async () => {
                 console.log('🔴 requestCallEnd called, current status:', callStateRef.current.status);
@@ -3810,6 +3857,12 @@
             const initiateReminderCall = useCallback(async (student) => {
                 if (!student?.phone) {
                     addToast('Student has no phone number', 'error');
+                    return;
+                }
+                
+                // Prevent double calls
+                if (callStateRef.current.status !== 'idle') {
+                    addToast('Please wait for the current call to finish.', 'error');
                     return;
                 }
                 

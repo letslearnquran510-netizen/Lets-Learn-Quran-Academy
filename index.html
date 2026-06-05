@@ -1212,70 +1212,69 @@
             const [audioUrl, setAudioUrl] = useState(null);
             const [loading, setLoading] = useState(false);
             const [error, setError] = useState(null);
-            const [retryCount, setRetryCount] = useState(0);
+            const [statusMsg, setStatusMsg] = useState('');
             const audioRef = useRef(null);
             const retryTimerRef = useRef(null);
+            const attemptRef = useRef(0);
             
-            // Load recording - checks if processing and auto-retries
-            const loadRecording = useCallback((isAutoRetry = false) => {
+            // Load recording: check status first, then stream directly (NO double-download)
+            const loadRecording = useCallback(() => {
                 if (!callSid) {
                     setError('Cannot load recording without call ID.');
                     return;
                 }
                 setLoading(true);
                 setError(null);
+                setAudioUrl(null);
                 
+                // Just check the metadata endpoint to know if recording exists/processing
                 fetch(`${BACKEND_URL}/recording/${callSid}`)
-                    .then(res => res.json())
-                    .then(data => {
+                    .then(res => res.json().then(data => ({ httpStatus: res.status, data })))
+                    .then(({ httpStatus, data }) => {
                         if (data.success && data.recordingUrl) {
-                            // Test the audio endpoint to catch "processing" status
-                            return fetch(`${BACKEND_URL}/recording-audio/${callSid}`, { method: 'GET' })
-                                .then(audioRes => {
-                                    if (audioRes.status === 202) {
-                                        // Still processing - auto-retry up to 5 times
-                                        if (retryCount < 5) {
-                                            setError('⏳ Recording is still processing. Retrying automatically...');
-                                            retryTimerRef.current = setTimeout(() => {
-                                                setRetryCount(c => c + 1);
-                                                loadRecording(true);
-                                            }, 4000);
-                                        } else {
-                                            setError('Recording is taking longer than usual. Please try again in a few minutes.');
-                                            setLoading(false);
-                                        }
-                                    } else if (audioRes.ok) {
-                                        // Ready! Set URL with cache-buster
-                                        setAudioUrl(`${BACKEND_URL}/recording-audio/${callSid}?t=${Date.now()}`);
-                                        setError(null);
-                                        setLoading(false);
-                                    } else {
-                                        setError('Recording could not be loaded. It may not be available.');
-                                        setLoading(false);
-                                    }
-                                });
-                        } else {
-                            setError(data.message || data.error || 'No recording available. The call may have failed or been too short to record.');
+                            // Recording exists! Stream it directly via audio element (single download)
+                            // Cache-buster ensures fresh load
+                            setAudioUrl(`${BACKEND_URL}/recording-audio/${callSid}?t=${Date.now()}`);
                             setLoading(false);
+                            setError(null);
+                            setStatusMsg('');
+                        } else if (httpStatus === 202 || data.error === 'processing') {
+                            // Still processing - auto-retry
+                            attemptRef.current += 1;
+                            if (attemptRef.current <= 6) {
+                                setStatusMsg(`⏳ Recording is still processing... (attempt ${attemptRef.current}/6)`);
+                                setError(null);
+                                retryTimerRef.current = setTimeout(loadRecording, 4000);
+                            } else {
+                                setLoading(false);
+                                setError('Recording is taking longer than usual to process. Please try again in a few minutes.');
+                            }
+                        } else {
+                            // No recording (failed call, too short, etc.)
+                            setLoading(false);
+                            setError(data.message || 'No recording available for this call. The call may have failed or was not recorded.');
                         }
                     })
                     .catch(err => {
                         console.error('Error fetching recording:', err);
-                        setError('Failed to load recording. Please check your connection and try again.');
                         setLoading(false);
+                        setError('Failed to load recording. Please check your connection and try again.');
                     });
-            }, [callSid, retryCount]);
+            }, [callSid]);
             
-            // Reset state when modal opens/closes or when props change
+            // Reset state when modal opens/closes
             useEffect(() => {
                 if (!isOpen) {
                     setAudioUrl(null);
                     setError(null);
                     setLoading(false);
-                    setRetryCount(0);
+                    setStatusMsg('');
+                    attemptRef.current = 0;
                     if (retryTimerRef.current) { clearTimeout(retryTimerRef.current); retryTimerRef.current = null; }
                     return;
                 }
+                
+                attemptRef.current = 0;
                 
                 // Direct non-Twilio URL (sample data)
                 if (url && !url.includes('twilio.com')) {
@@ -1292,14 +1291,22 @@
                 };
             }, [isOpen, url, callSid]);
             
-            const handleAudioError = () => {
-                console.error('Audio playback error');
-                // Audio element failed - might be processing, retry
-                if (retryCount < 3) {
-                    setError('⏳ Recording loading... retrying.');
-                    setTimeout(() => { setRetryCount(c => c + 1); loadRecording(true); }, 3000);
+            const handleAudioError = (e) => {
+                console.error('Audio playback error:', e?.target?.error);
+                // The <audio> element failed to load the stream
+                // Re-check via metadata: could be processing, or genuinely broken
+                attemptRef.current += 1;
+                if (attemptRef.current <= 4) {
+                    setStatusMsg(`⏳ Loading recording... retrying (${attemptRef.current}/4)`);
+                    setError(null);
+                    setAudioUrl(null);
+                    retryTimerRef.current = setTimeout(() => {
+                        // Force a fresh stream attempt with new cache-buster
+                        setAudioUrl(`${BACKEND_URL}/recording-audio/${callSid}?t=${Date.now()}`);
+                    }, 3000);
                 } else {
-                    setError('Failed to play recording. The file may still be processing. Try again in a moment.');
+                    setStatusMsg('');
+                    setError('Could not play this recording after several attempts. It may still be processing on Twilio, or the recording was not saved. Try again in a few minutes.');
                 }
             };
             
@@ -1317,7 +1324,7 @@
                         {loading ? (
                             <div className="flex items-center justify-center py-8">
                                 <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-indigo-500"></div>
-                                <span className="ml-3 text-slate-600">Loading recording...</span>
+                                <span className="ml-3 text-slate-600">{statusMsg || 'Loading recording...'}</span>
                             </div>
                         ) : error ? (
                             <div className="bg-red-50 text-red-700 p-4 rounded-lg text-center">
@@ -1325,7 +1332,7 @@
                                 {callSid && (
                                     <button 
                                         onClick={() => {
-                                            setRetryCount(0);
+                                            attemptRef.current = 0;
                                             loadRecording();
                                         }}
                                         className="mt-3 px-4 py-2 bg-indigo-500 text-white rounded-lg text-sm hover:bg-indigo-600"
@@ -1333,6 +1340,11 @@
                                         Try Again
                                     </button>
                                 )}
+                            </div>
+                        ) : statusMsg && !audioUrl ? (
+                            <div className="flex items-center justify-center py-8">
+                                <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-indigo-500"></div>
+                                <span className="ml-3 text-slate-600">{statusMsg}</span>
                             </div>
                         ) : audioUrl ? (
                             <audio 

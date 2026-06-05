@@ -2810,39 +2810,85 @@ app.get('/recording-audio/:callSid', async (req, res) => {
             if (cachedCall?.recordingUrl) recordingUrl = cachedCall.recordingUrl;
         }
         
+        // Also check database
+        if (!recordingUrl && dbConnected) {
+            try {
+                const call = await CallHistory.findOne({ callSid });
+                if (call?.recordingUrl) recordingUrl = call.recordingUrl;
+            } catch (e) {}
+        }
+        
         if (!recordingUrl && twilioClient) {
             const recordings = await twilioClient.recordings.list({ callSid, limit: 1 });
             if (recordings.length > 0) {
-                recordingUrl = `https://api.twilio.com${recordings[0].uri.replace('.json', '.mp3')}`;
+                const rec = recordings[0];
+                // Check if recording is completed (not still processing)
+                if (rec.status === 'completed') {
+                    recordingUrl = `https://api.twilio.com${rec.uri.replace('.json', '.mp3')}`;
+                } else {
+                    return res.status(202).json({ error: 'processing', message: 'Recording is still processing. Please try again in a moment.' });
+                }
             }
         }
         
         if (!recordingUrl) {
-            return res.status(404).json({ error: 'Recording not found' });
+            return res.status(404).json({ error: 'not_found', message: 'No recording exists for this call.' });
         }
         
         const authString = Buffer.from(`${config.twilio.accountSid}:${config.twilio.authToken}`).toString('base64');
         
-        const audioRequest = https.request(recordingUrl, {
-            headers: { 'Authorization': `Basic ${authString}` }
-        }, (audioResponse) => {
-            res.set('Content-Type', audioResponse.headers['content-type'] || 'audio/mpeg');
-            if (audioResponse.headers['content-length']) {
-                res.set('Content-Length', audioResponse.headers['content-length']);
-            }
-            audioResponse.pipe(res);
-        });
+        // Helper to stream from a URL, following redirects, checking status
+        const streamFrom = (urlToFetch, redirectsLeft = 3) => {
+            const audioRequest = https.request(urlToFetch, {
+                headers: { 'Authorization': `Basic ${authString}` }
+            }, (audioResponse) => {
+                const statusCode = audioResponse.statusCode;
+                
+                // Follow redirects (Twilio sometimes redirects to S3)
+                if ((statusCode === 301 || statusCode === 302 || statusCode === 307) && audioResponse.headers.location && redirectsLeft > 0) {
+                    audioResponse.resume(); // Drain
+                    return streamFrom(audioResponse.headers.location, redirectsLeft - 1);
+                }
+                
+                // If not OK, recording isn't ready - return JSON error (NOT piped as audio)
+                if (statusCode !== 200) {
+                    audioResponse.resume(); // Drain
+                    if (!res.headersSent) {
+                        if (statusCode === 404) {
+                            return res.status(202).json({ error: 'processing', message: 'Recording still processing. Try again shortly.' });
+                        }
+                        return res.status(statusCode).json({ error: 'fetch_failed', message: `Could not fetch recording (${statusCode})` });
+                    }
+                    return;
+                }
+                
+                // Success - pipe the actual audio
+                const contentType = audioResponse.headers['content-type'] || 'audio/mpeg';
+                res.set('Content-Type', contentType);
+                res.set('Accept-Ranges', 'bytes');
+                if (audioResponse.headers['content-length']) {
+                    res.set('Content-Length', audioResponse.headers['content-length']);
+                }
+                audioResponse.pipe(res);
+            });
+            
+            audioRequest.on('error', (err) => {
+                console.error('Audio stream error:', err.message);
+                if (!res.headersSent) {
+                    res.status(500).json({ error: 'stream_error', message: 'Failed to stream recording' });
+                }
+            });
+            
+            audioRequest.end();
+        };
         
-        audioRequest.on('error', (err) => {
-            console.error('Audio stream error:', err.message);
-            res.status(500).json({ error: 'Failed to stream recording' });
-        });
-        
-        audioRequest.end();
+        streamFrom(recordingUrl);
         
     } catch (error) {
         console.error('Audio stream error:', error.message);
-        res.status(500).json({ error: 'Failed to stream recording' });
+        if (!res.headersSent) {
+            res.status(500).json({ error: 'server_error', message: 'Failed to stream recording' });
+        }
     }
 });
 

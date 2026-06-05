@@ -2995,6 +2995,54 @@ app.get('/debug/recording/:callSid', async (req, res) => {
         }
     }
     
+    // Check account balance (zero balance blocks recording access!)
+    if (twilioClient) {
+        try {
+            const balance = await twilioClient.balance.fetch();
+            result.accountBalance = { balance: balance.balance, currency: balance.currency };
+        } catch (e) {
+            result.accountBalance = { error: e.message, code: e.code };
+        }
+        
+        // Check account status (suspended accounts can't access recordings)
+        try {
+            const account = await twilioClient.api.accounts(config.twilio.accountSid).fetch();
+            result.accountStatus = { status: account.status, type: account.type };
+        } catch (e) {
+            result.accountStatus = { error: e.message, code: e.code };
+        }
+    }
+    
+    // ACTUALLY TEST fetching the media file - reports the EXACT status Twilio returns
+    const mediaUrl = result.cache?.url || result.activeCalls?.recordingUrl || result.database?.recordingUrl 
+        || (Array.isArray(result.twilioByCallSid) && result.twilioByCallSid[0] 
+            ? `https://api.twilio.com${result.twilioByCallSid[0].uri.replace('.json', '.mp3')}` 
+            : null);
+    
+    if (mediaUrl) {
+        result.mediaFetchTest = await new Promise((resolve) => {
+            const authString = Buffer.from(`${config.twilio.accountSid}:${config.twilio.authToken}`).toString('base64');
+            const testReq = https.request(mediaUrl, { headers: { 'Authorization': `Basic ${authString}` } }, (r) => {
+                r.resume();
+                resolve({ 
+                    url: mediaUrl.substring(0, 70), 
+                    twilioStatus: r.statusCode,
+                    redirectsTo: r.headers.location ? r.headers.location.substring(0, 50) : null,
+                    meaning: r.statusCode === 200 ? 'OK - recording accessible' 
+                        : r.statusCode === 401 ? '401 - AUTH REJECTED (account suspended/zero balance, or wrong token)'
+                        : r.statusCode === 404 ? '404 - recording not found/still processing'
+                        : (r.statusCode === 302 || r.statusCode === 307) ? `${r.statusCode} - redirect (normal, to S3)`
+                        : `${r.statusCode} - unexpected`
+                });
+            });
+            testReq.on('error', (e) => resolve({ error: e.message }));
+            testReq.setTimeout(8000, () => { testReq.destroy(); resolve({ error: 'timeout' }); });
+            testReq.end();
+        });
+    } else {
+        result.mediaFetchTest = { note: 'No media URL available to test' };
+    }
+    
     res.json(result);
 });
 

@@ -785,6 +785,53 @@
                 this.soundInterval = setInterval(ring, 4000);
             },
             
+            // LOUD PROFESSIONAL INCOMING CALL RINGTONE - dual-tone, classic phone ring
+            // Uses Web Audio API so it ALWAYS works (no external file dependency)
+            playIncomingRing() {
+                this.stop();
+                this._init();
+                if (!this.audioContext) return;
+                
+                // Resume context if suspended (browser autoplay policy)
+                if (this.audioContext.state === 'suspended') {
+                    this.audioContext.resume();
+                }
+                
+                const playRingBurst = () => {
+                    if (!this.audioContext) return;
+                    const now = this.audioContext.currentTime;
+                    
+                    // Classic dual-tone phone ring (two frequencies = richer sound)
+                    [440, 480].forEach(freq => {
+                        const osc = this.audioContext.createOscillator();
+                        const gain = this.audioContext.createGain();
+                        osc.connect(gain);
+                        gain.connect(this.audioContext.destination);
+                        osc.frequency.value = freq;
+                        osc.type = 'sine';
+                        
+                        // Loud ring pattern: RING-RING (2 bursts), then pause
+                        // Burst 1
+                        gain.gain.setValueAtTime(0, now);
+                        gain.gain.linearRampToValueAtTime(0.4, now + 0.02);  // Loud (0.4)
+                        gain.gain.setValueAtTime(0.4, now + 0.4);
+                        gain.gain.linearRampToValueAtTime(0, now + 0.45);
+                        // Burst 2
+                        gain.gain.setValueAtTime(0, now + 0.5);
+                        gain.gain.linearRampToValueAtTime(0.4, now + 0.52);
+                        gain.gain.setValueAtTime(0.4, now + 0.9);
+                        gain.gain.linearRampToValueAtTime(0, now + 0.95);
+                        
+                        osc.start(now);
+                        osc.stop(now + 1.0);
+                    });
+                };
+                
+                playRingBurst();
+                // Repeat every 3 seconds (classic phone ring cadence)
+                this.soundInterval = setInterval(playRingBurst, 3000);
+            },
+            
             playBusy() {
                 this.stop();
                 this._init();
@@ -1165,7 +1212,59 @@
             const [audioUrl, setAudioUrl] = useState(null);
             const [loading, setLoading] = useState(false);
             const [error, setError] = useState(null);
+            const [retryCount, setRetryCount] = useState(0);
             const audioRef = useRef(null);
+            const retryTimerRef = useRef(null);
+            
+            // Load recording - checks if processing and auto-retries
+            const loadRecording = useCallback((isAutoRetry = false) => {
+                if (!callSid) {
+                    setError('Cannot load recording without call ID.');
+                    return;
+                }
+                setLoading(true);
+                setError(null);
+                
+                fetch(`${BACKEND_URL}/recording/${callSid}`)
+                    .then(res => res.json())
+                    .then(data => {
+                        if (data.success && data.recordingUrl) {
+                            // Test the audio endpoint to catch "processing" status
+                            return fetch(`${BACKEND_URL}/recording-audio/${callSid}`, { method: 'GET' })
+                                .then(audioRes => {
+                                    if (audioRes.status === 202) {
+                                        // Still processing - auto-retry up to 5 times
+                                        if (retryCount < 5) {
+                                            setError('⏳ Recording is still processing. Retrying automatically...');
+                                            retryTimerRef.current = setTimeout(() => {
+                                                setRetryCount(c => c + 1);
+                                                loadRecording(true);
+                                            }, 4000);
+                                        } else {
+                                            setError('Recording is taking longer than usual. Please try again in a few minutes.');
+                                            setLoading(false);
+                                        }
+                                    } else if (audioRes.ok) {
+                                        // Ready! Set URL with cache-buster
+                                        setAudioUrl(`${BACKEND_URL}/recording-audio/${callSid}?t=${Date.now()}`);
+                                        setError(null);
+                                        setLoading(false);
+                                    } else {
+                                        setError('Recording could not be loaded. It may not be available.');
+                                        setLoading(false);
+                                    }
+                                });
+                        } else {
+                            setError(data.message || data.error || 'No recording available. The call may have failed or been too short to record.');
+                            setLoading(false);
+                        }
+                    })
+                    .catch(err => {
+                        console.error('Error fetching recording:', err);
+                        setError('Failed to load recording. Please check your connection and try again.');
+                        setLoading(false);
+                    });
+            }, [callSid, retryCount]);
             
             // Reset state when modal opens/closes or when props change
             useEffect(() => {
@@ -1173,65 +1272,35 @@
                     setAudioUrl(null);
                     setError(null);
                     setLoading(false);
+                    setRetryCount(0);
+                    if (retryTimerRef.current) { clearTimeout(retryTimerRef.current); retryTimerRef.current = null; }
                     return;
                 }
                 
-                // If we have a direct URL, use it (but proxy Twilio URLs)
-                if (url) {
-                    // Check if it's a Twilio URL that needs proxying
-                    if (url.includes('api.twilio.com') || url.includes('twilio.com')) {
-                        // Use our proxy endpoint
-                        if (callSid) {
-                            setLoading(true);
-                            setError(null);
-                            fetch(`${BACKEND_URL}/recording/${callSid}`)
-                                .then(res => res.json())
-                                .then(data => {
-                                    if (data.success && data.recordingUrl) {
-                                        // Use proxy URL
-                                        setAudioUrl(`${BACKEND_URL}/recording-audio/${callSid}`);
-                                    } else {
-                                        setError('Recording not available yet.');
-                                    }
-                                })
-                                .catch(() => setError('Failed to load recording.'))
-                                .finally(() => setLoading(false));
-                        } else {
-                            setError('Cannot load recording without call ID.');
-                        }
-                    } else {
-                        // Direct URL (sample data or other sources)
-                        setAudioUrl(url);
-                        setError(null);
-                    }
-                } else if (callSid) {
-                    // No URL but we have callSid - fetch from server
-                    setLoading(true);
+                // Direct non-Twilio URL (sample data)
+                if (url && !url.includes('twilio.com')) {
+                    setAudioUrl(url);
                     setError(null);
-                    
-                    fetch(`${BACKEND_URL}/recording/${callSid}`)
-                        .then(res => res.json())
-                        .then(data => {
-                            if (data.success && data.recordingUrl) {
-                                // Use proxy URL for Twilio recordings
-                                setAudioUrl(`${BACKEND_URL}/recording-audio/${callSid}`);
-                            } else {
-                                setError(data.error || 'Recording not available. The call may have been too short or is still processing.');
-                            }
-                        })
-                        .catch(err => {
-                            console.error('Error fetching recording:', err);
-                            setError('Failed to load recording. Please try again.');
-                        })
-                        .finally(() => setLoading(false));
-                } else {
-                    setError('No recording available for this call.');
+                    return;
                 }
+                
+                // Twilio recording or callSid-based - load via server
+                loadRecording();
+                
+                return () => {
+                    if (retryTimerRef.current) { clearTimeout(retryTimerRef.current); retryTimerRef.current = null; }
+                };
             }, [isOpen, url, callSid]);
             
             const handleAudioError = () => {
                 console.error('Audio playback error');
-                setError('Failed to play recording. The file may not be available or is still processing.');
+                // Audio element failed - might be processing, retry
+                if (retryCount < 3) {
+                    setError('⏳ Recording loading... retrying.');
+                    setTimeout(() => { setRetryCount(c => c + 1); loadRecording(true); }, 3000);
+                } else {
+                    setError('Failed to play recording. The file may still be processing. Try again in a moment.');
+                }
             };
             
             if (!isOpen) return null;
@@ -1256,20 +1325,8 @@
                                 {callSid && (
                                     <button 
                                         onClick={() => {
-                                            setError(null);
-                                            setLoading(true);
-                                            fetch(`${BACKEND_URL}/recording/${callSid}`)
-                                                .then(res => res.json())
-                                                .then(data => {
-                                                    if (data.success && data.recordingUrl) {
-                                                        setAudioUrl(`${BACKEND_URL}/recording-audio/${callSid}`);
-                                                        setError(null);
-                                                    } else {
-                                                        setError('Recording still not available.');
-                                                    }
-                                                })
-                                                .catch(() => setError('Failed to load recording.'))
-                                                .finally(() => setLoading(false));
+                                            setRetryCount(0);
+                                            loadRecording();
                                         }}
                                         className="mt-3 px-4 py-2 bg-indigo-500 text-white rounded-lg text-sm hover:bg-indigo-600"
                                     >
@@ -3219,6 +3276,8 @@
             const [incomingCall, setIncomingCall] = useState(null);
             const [isAnsweringCall, setIsAnsweringCall] = useState(false);
             const incomingCallAudioRef = useRef(null);
+            const incomingNotificationRef = useRef(null); // Browser notification
+            const titleFlashRef = useRef(null); // Tab title flashing
             
             // Active incoming voice call state (after answering)
             const [activeIncomingVoice, setActiveIncomingVoice] = useState(null);
@@ -3262,6 +3321,20 @@
                 console.log('🔌 Setting up WebSocket connection...');
                 wsManager.connect();
                 wsManager.setUserType(user.type, user.name || user.email);
+                
+                // Request browser notification permission (for incoming call alerts when minimized)
+                try {
+                    if ('Notification' in window && Notification.permission === 'default') {
+                        Notification.requestPermission().then(permission => {
+                            console.log('🔔 Notification permission:', permission);
+                            if (permission === 'granted') {
+                                addToast('✅ Call notifications enabled', 'success');
+                            }
+                        });
+                    }
+                } catch (e) {
+                    console.log('Notification permission error:', e);
+                }
                 
                 // Set up the status update handler
                 wsManager.setStatusHandler((data) => {
@@ -3362,20 +3435,67 @@
                     console.log('📞 INCOMING CALL RECEIVED:', call);
                     setIncomingCall(call);
                     
-                    // Play ringtone
+                    // 1. LOUD PROFESSIONAL RINGTONE (Web Audio - always works)
+                    try {
+                        audioManager.playIncomingRing();
+                    } catch (e) {
+                        console.error('Ringtone error:', e);
+                    }
+                    
+                    // 2. Backup ringtone (external file, in case Web Audio blocked)
                     try {
                         if (incomingCallAudioRef.current) {
                             incomingCallAudioRef.current.pause();
                         }
                         incomingCallAudioRef.current = new Audio('https://assets.mixkit.co/active_storage/sfx/2869/2869-preview.mp3');
                         incomingCallAudioRef.current.loop = true;
-                        incomingCallAudioRef.current.volume = 0.5;
-                        incomingCallAudioRef.current.play().catch(e => console.log('Audio play prevented:', e));
+                        incomingCallAudioRef.current.volume = 1.0; // MAX volume
+                        incomingCallAudioRef.current.play().catch(e => console.log('Backup audio prevented:', e));
+                    } catch (e) {}
+                    
+                    // 3. BROWSER NOTIFICATION (shows even when app minimized / other tab)
+                    try {
+                        if ('Notification' in window && Notification.permission === 'granted') {
+                            const notif = new Notification('📞 Incoming Call - Quran Academy', {
+                                body: `Call from ${call.callerName || 'Student'}`,
+                                icon: 'https://cdn-icons-png.flaticon.com/512/455/455705.png',
+                                badge: 'https://cdn-icons-png.flaticon.com/512/455/455705.png',
+                                tag: 'incoming-call',
+                                requireInteraction: true, // Stays until user interacts
+                                renotify: true,
+                                vibrate: [300, 100, 300, 100, 300]
+                            });
+                            notif.onclick = () => {
+                                window.focus();
+                                notif.close();
+                            };
+                            incomingNotificationRef.current = notif;
+                        }
                     } catch (e) {
-                        console.error('Ringtone error:', e);
+                        console.error('Notification error:', e);
                     }
                     
-                    // Show notification
+                    // 4. VIBRATE on mobile devices
+                    try {
+                        if ('vibrate' in navigator) {
+                            // Vibrate pattern repeats while ringing
+                            navigator.vibrate([300, 100, 300, 100, 300, 100, 300]);
+                        }
+                    } catch (e) {}
+                    
+                    // 5. FLASH TAB TITLE (grabs attention when on another tab)
+                    try {
+                        if (titleFlashRef.current) clearInterval(titleFlashRef.current);
+                        const originalTitle = document.title;
+                        let showCall = true;
+                        titleFlashRef.current = setInterval(() => {
+                            document.title = showCall ? '📞 INCOMING CALL!' : originalTitle;
+                            showCall = !showCall;
+                        }, 800);
+                        titleFlashRef.current.originalTitle = originalTitle;
+                    } catch (e) {}
+                    
+                    // 6. Toast notification
                     addToast(`📞 Incoming call from ${call.callerName}!`, 'info');
                 });
                 
@@ -3384,9 +3504,27 @@
                     console.log('📞 Incoming call status update:', data);
                     
                     // Stop ringtone on any terminal status
+                    audioManager.stop();
                     if (incomingCallAudioRef.current) {
                         incomingCallAudioRef.current.pause();
                         incomingCallAudioRef.current = null;
+                    }
+                    
+                    // Stop vibration
+                    try { if ('vibrate' in navigator) navigator.vibrate(0); } catch(e) {}
+                    
+                    // Close browser notification
+                    if (incomingNotificationRef.current) {
+                        try { incomingNotificationRef.current.close(); } catch(e) {}
+                        incomingNotificationRef.current = null;
+                    }
+                    
+                    // Stop tab title flashing
+                    if (titleFlashRef.current) {
+                        const orig = titleFlashRef.current.originalTitle;
+                        clearInterval(titleFlashRef.current);
+                        titleFlashRef.current = null;
+                        if (orig) document.title = orig;
                     }
                     
                     // For 'answered' status - check if THIS device answered or another device
@@ -3746,16 +3884,38 @@
             };
 
             // --- Incoming Call Handlers ---
+            // Helper: Stop ALL incoming call alerts (ringtone, notification, vibration, title flash)
+            const stopAllIncomingAlerts = useCallback(() => {
+                // Stop Web Audio ringtone
+                audioManager.stop();
+                // Stop backup audio
+                if (incomingCallAudioRef.current) {
+                    incomingCallAudioRef.current.pause();
+                    incomingCallAudioRef.current = null;
+                }
+                // Stop vibration
+                try { if ('vibrate' in navigator) navigator.vibrate(0); } catch(e) {}
+                // Close browser notification
+                if (incomingNotificationRef.current) {
+                    try { incomingNotificationRef.current.close(); } catch(e) {}
+                    incomingNotificationRef.current = null;
+                }
+                // Stop tab title flashing
+                if (titleFlashRef.current) {
+                    const orig = titleFlashRef.current.originalTitle;
+                    clearInterval(titleFlashRef.current);
+                    titleFlashRef.current = null;
+                    if (orig) document.title = orig;
+                }
+            }, []);
+
             const handleAnswerIncomingCall = useCallback(async () => {
                 if (!incomingCall) return;
                 
                 setIsAnsweringCall(true);
                 
-                // Stop ringtone
-                if (incomingCallAudioRef.current) {
-                    incomingCallAudioRef.current.pause();
-                    incomingCallAudioRef.current = null;
-                }
+                // Stop all alerts (ringtone, notification, vibration, title flash)
+                stopAllIncomingAlerts();
                 
                 // Re-init voice device if not ready
                 if (!twilioVoiceManager.isReady) {
@@ -3805,11 +3965,8 @@
             const handleRejectIncomingCall = useCallback(async (reason) => {
                 if (!incomingCall) return;
                 
-                // Stop ringtone
-                if (incomingCallAudioRef.current) {
-                    incomingCallAudioRef.current.pause();
-                    incomingCallAudioRef.current = null;
-                }
+                // Stop all alerts (ringtone, notification, vibration, title flash)
+                stopAllIncomingAlerts();
                 
                 // Disconnect any active call
                 twilioVoiceManager.hangup();

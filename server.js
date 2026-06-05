@@ -2801,44 +2801,73 @@ app.get('/recording-audio/:callSid', async (req, res) => {
     
     try {
         let recordingUrl = null;
+        let source = '';
         
         const cachedRecording = recordingsMap.get(callSid);
-        if (cachedRecording?.url) recordingUrl = cachedRecording.url;
+        if (cachedRecording?.url) { recordingUrl = cachedRecording.url; source = 'cache'; }
         
         if (!recordingUrl) {
             const cachedCall = activeCalls.get(callSid);
-            if (cachedCall?.recordingUrl) recordingUrl = cachedCall.recordingUrl;
+            if (cachedCall?.recordingUrl) { recordingUrl = cachedCall.recordingUrl; source = 'activeCalls'; }
         }
         
         // Also check database
         if (!recordingUrl && dbConnected) {
             try {
                 const call = await CallHistory.findOne({ callSid });
-                if (call?.recordingUrl) recordingUrl = call.recordingUrl;
+                if (call?.recordingUrl) { recordingUrl = call.recordingUrl; source = 'database'; }
             } catch (e) {}
         }
         
+        // Try Twilio API by callSid
         if (!recordingUrl && twilioClient) {
-            const recordings = await twilioClient.recordings.list({ callSid, limit: 1 });
+            const recordings = await twilioClient.recordings.list({ callSid, limit: 5 });
             if (recordings.length > 0) {
-                const rec = recordings[0];
-                // Check if recording is completed (not still processing)
+                const rec = recordings.find(r => r.status === 'completed') || recordings[0];
                 if (rec.status === 'completed') {
                     recordingUrl = `https://api.twilio.com${rec.uri.replace('.json', '.mp3')}`;
+                    source = 'twilio-callsid';
                 } else {
+                    console.log(`🎙️ Recording for ${callSid} status: ${rec.status} (not completed yet)`);
                     return res.status(202).json({ error: 'processing', message: 'Recording is still processing. Please try again in a moment.' });
                 }
             }
         }
         
-        if (!recordingUrl) {
-            return res.status(404).json({ error: 'not_found', message: 'No recording exists for this call.' });
+        // FALLBACK: Try conference recording (for conference-based calls)
+        // Look up the conference name, then find recording by conference
+        if (!recordingUrl && twilioClient) {
+            let confName = null;
+            const cachedCall = activeCalls.get(callSid);
+            if (cachedCall?.conferenceName) confName = cachedCall.conferenceName;
+            
+            if (confName) {
+                try {
+                    const confs = await twilioClient.conferences.list({ friendlyName: confName, limit: 1 });
+                    if (confs.length > 0) {
+                        const confRecordings = await twilioClient.conferences(confs[0].sid).recordings.list({ limit: 1 });
+                        if (confRecordings.length > 0 && confRecordings[0].status === 'completed') {
+                            recordingUrl = `https://api.twilio.com${confRecordings[0].uri.replace('.json', '.mp3')}`;
+                            source = 'twilio-conference';
+                        }
+                    }
+                } catch (e) {
+                    console.log('Conference recording lookup failed:', e.message);
+                }
+            }
         }
+        
+        if (!recordingUrl) {
+            console.log(`🎙️ No recording found for ${callSid} (checked all sources)`);
+            return res.status(404).json({ error: 'not_found', message: 'No recording exists for this call. The call may have failed or not been recorded.' });
+        }
+        
+        console.log(`🎙️ Serving recording for ${callSid} from ${source}`);
         
         const authString = Buffer.from(`${config.twilio.accountSid}:${config.twilio.authToken}`).toString('base64');
         
         // Helper to stream from a URL, following redirects, checking status
-        const streamFrom = (urlToFetch, redirectsLeft = 3) => {
+        const streamFrom = (urlToFetch, redirectsLeft = 5) => {
             const audioRequest = https.request(urlToFetch, {
                 headers: { 'Authorization': `Basic ${authString}` }
             }, (audioResponse) => {
@@ -2890,6 +2919,68 @@ app.get('/recording-audio/:callSid', async (req, res) => {
             res.status(500).json({ error: 'server_error', message: 'Failed to stream recording' });
         }
     }
+});
+
+// DIAGNOSTIC: Debug recording issues - shows exactly what exists for a call
+app.get('/debug/recording/:callSid', async (req, res) => {
+    const { callSid } = req.params;
+    const result = {
+        callSid,
+        cache: null,
+        activeCalls: null,
+        database: null,
+        twilioByCallSid: [],
+        twilioByConference: [],
+        twilioAuth: 'unknown'
+    };
+    
+    // Check cache
+    const cached = recordingsMap.get(callSid);
+    if (cached) result.cache = { url: cached.url, duration: cached.duration };
+    
+    // Check activeCalls
+    const ac = activeCalls.get(callSid);
+    if (ac) result.activeCalls = { recordingUrl: ac.recordingUrl, conferenceName: ac.conferenceName, status: ac.status };
+    
+    // Check database
+    if (dbConnected) {
+        try {
+            const call = await CallHistory.findOne({ callSid });
+            if (call) result.database = { recordingUrl: call.recordingUrl, status: call.status, duration: call.duration };
+        } catch (e) { result.database = { error: e.message }; }
+    }
+    
+    // Check Twilio by callSid
+    if (twilioClient) {
+        try {
+            const recordings = await twilioClient.recordings.list({ callSid, limit: 5 });
+            result.twilioByCallSid = recordings.map(r => ({ sid: r.sid, status: r.status, duration: r.duration, uri: r.uri }));
+            result.twilioAuth = 'working';
+        } catch (e) {
+            result.twilioByCallSid = { error: e.message, code: e.code };
+            result.twilioAuth = e.code === 20003 ? 'AUTH FAILED - check credentials' : 'error';
+        }
+        
+        // Check by conference
+        const confName = ac?.conferenceName;
+        if (confName) {
+            try {
+                const confs = await twilioClient.conferences.list({ friendlyName: confName, limit: 2 });
+                for (const conf of confs) {
+                    const confRecs = await twilioClient.conferences(conf.sid).recordings.list({ limit: 5 });
+                    result.twilioByConference.push({
+                        conferenceSid: conf.sid,
+                        conferenceName: confName,
+                        recordings: confRecs.map(r => ({ sid: r.sid, status: r.status, duration: r.duration }))
+                    });
+                }
+            } catch (e) {
+                result.twilioByConference = { error: e.message };
+            }
+        }
+    }
+    
+    res.json(result);
 });
 
 // ---------------------------------------------------------

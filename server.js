@@ -2868,13 +2868,23 @@ app.get('/recording-audio/:callSid', async (req, res) => {
         
         // Helper to stream from a URL, following redirects, checking status
         const streamFrom = (urlToFetch, redirectsLeft = 5) => {
+            // CRITICAL: Only send Basic Auth to api.twilio.com URLs.
+            // Twilio redirects recordings to a PRE-SIGNED Amazon S3 URL.
+            // S3 pre-signed URLs REJECT the Basic Auth header with 401.
+            // So we must NOT send auth to non-Twilio (S3) redirect targets.
+            const isTwilioUrl = urlToFetch.includes('api.twilio.com') || urlToFetch.includes('.twilio.com/');
+            const requestHeaders = isTwilioUrl ? { 'Authorization': `Basic ${authString}` } : {};
+            
+            console.log(`🎙️ Fetching recording chunk: ${isTwilioUrl ? 'Twilio (with auth)' : 'S3/redirect (no auth)'} - ${urlToFetch.substring(0, 50)}...`);
+            
             const audioRequest = https.request(urlToFetch, {
-                headers: { 'Authorization': `Basic ${authString}` }
+                headers: requestHeaders
             }, (audioResponse) => {
                 const statusCode = audioResponse.statusCode;
                 
-                // Follow redirects (Twilio sometimes redirects to S3)
-                if ((statusCode === 301 || statusCode === 302 || statusCode === 307) && audioResponse.headers.location && redirectsLeft > 0) {
+                // Follow redirects (Twilio redirects to S3 - drop auth for S3)
+                if ((statusCode === 301 || statusCode === 302 || statusCode === 307 || statusCode === 303) && audioResponse.headers.location && redirectsLeft > 0) {
+                    console.log(`🎙️ Recording redirect ${statusCode} → following without auth (S3 pre-signed)`);
                     audioResponse.resume(); // Drain
                     return streamFrom(audioResponse.headers.location, redirectsLeft - 1);
                 }
@@ -2882,11 +2892,15 @@ app.get('/recording-audio/:callSid', async (req, res) => {
                 // If not OK, recording isn't ready - return JSON error (NOT piped as audio)
                 if (statusCode !== 200) {
                     audioResponse.resume(); // Drain
+                    console.log(`🎙️ Recording fetch returned ${statusCode} for ${urlToFetch.substring(0, 50)}`);
                     if (!res.headersSent) {
                         if (statusCode === 404) {
                             return res.status(202).json({ error: 'processing', message: 'Recording still processing. Try again shortly.' });
                         }
-                        return res.status(statusCode).json({ error: 'fetch_failed', message: `Could not fetch recording (${statusCode})` });
+                        if (statusCode === 401 || statusCode === 403) {
+                            return res.status(502).json({ error: 'auth_failed', message: `Twilio rejected the request (${statusCode}). Check TWILIO_AUTH_TOKEN, or recording may be under a subaccount.` });
+                        }
+                        return res.status(502).json({ error: 'fetch_failed', message: `Could not fetch recording (${statusCode})` });
                     }
                     return;
                 }
@@ -2898,6 +2912,7 @@ app.get('/recording-audio/:callSid', async (req, res) => {
                 if (audioResponse.headers['content-length']) {
                     res.set('Content-Length', audioResponse.headers['content-length']);
                 }
+                console.log(`🎙️ ✅ Streaming recording (${contentType})`);
                 audioResponse.pipe(res);
             });
             
@@ -3572,8 +3587,8 @@ app.post('/webhooks/sms-status', async (req, res) => {
 app.get('/health', (req, res) => {
     res.json({
         status: 'ok',
-        version: 'RECORDING-FIX-V3-2026',  // ← Verify this shows after deploy!
-        buildDate: '2026-recording-bulletproof',
+        version: 'RECORDING-FIX-V4-S3AUTH-2026',  // ← Verify this shows after deploy!
+        buildDate: '2026-s3-auth-redirect-fix',
         timestamp: new Date().toISOString(),
         twilio: !!twilioClient,
         twilioVideo: hasVideoApiKeys(),

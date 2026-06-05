@@ -1294,19 +1294,57 @@
             const handleAudioError = (e) => {
                 console.error('Audio playback error:', e?.target?.error);
                 // The <audio> element failed to load the stream
-                // Re-check via metadata: could be processing, or genuinely broken
                 attemptRef.current += 1;
-                if (attemptRef.current <= 4) {
-                    setStatusMsg(`⏳ Loading recording... retrying (${attemptRef.current}/4)`);
+                if (attemptRef.current <= 3) {
+                    setStatusMsg(`⏳ Loading recording... retrying (${attemptRef.current}/3)`);
                     setError(null);
                     setAudioUrl(null);
                     retryTimerRef.current = setTimeout(() => {
-                        // Force a fresh stream attempt with new cache-buster
                         setAudioUrl(`${BACKEND_URL}/recording-audio/${callSid}?t=${Date.now()}`);
-                    }, 3000);
+                    }, 2500);
                 } else {
-                    setStatusMsg('');
-                    setError('Could not play this recording after several attempts. It may still be processing on Twilio, or the recording was not saved. Try again in a few minutes.');
+                    // Failed after retries - AUTO-DIAGNOSE and show the real reason
+                    setStatusMsg('🔍 Diagnosing the problem...');
+                    setError(null);
+                    setAudioUrl(null);
+                    
+                    fetch(`${BACKEND_URL}/debug/recording/${callSid}`)
+                        .then(res => res.json())
+                        .then(diag => {
+                            setStatusMsg('');
+                            let msg = '';
+                            
+                            // Check account status first (most important)
+                            const acctStatus = diag.accountStatus?.status;
+                            const balance = diag.accountBalance?.balance;
+                            const mediaStatus = diag.mediaFetchTest?.twilioStatus;
+                            const mediaMeaning = diag.mediaFetchTest?.meaning;
+                            
+                            if (acctStatus && acctStatus !== 'active') {
+                                msg = `🚫 Your Twilio account is "${acctStatus.toUpperCase()}". Recordings cannot be accessed until the account is reactivated. This usually happens when the account balance reaches zero.`;
+                            } else if (mediaStatus === 401 || mediaStatus === 403) {
+                                msg = `🚫 Twilio rejected access to this recording (${mediaStatus}). ${balance !== undefined ? `Account balance: ${balance} ${diag.accountBalance?.currency || ''}.` : ''} This usually means the account is suspended or out of credit. Recordings become accessible again once you add credit.`;
+                            } else if (diag.twilioAuth === 'AUTH FAILED - check credentials') {
+                                msg = `🚫 Twilio authentication failed. The account credentials may be invalid, or the account is suspended.`;
+                            } else if (Array.isArray(diag.twilioByCallSid) && diag.twilioByCallSid.length === 0 && !diag.database?.recordingUrl) {
+                                msg = `ℹ️ No recording exists for this call on Twilio. The call may have failed, been too short, or recording wasn't enabled at the time.`;
+                            } else if (mediaStatus === 404) {
+                                msg = `⏳ The recording is still being processed by Twilio. Please try again in a few minutes.`;
+                            } else {
+                                msg = `Could not play this recording. Twilio returned status ${mediaStatus || 'unknown'}. ${mediaMeaning || ''}`;
+                            }
+                            
+                            // Add balance info if available and relevant
+                            if (balance !== undefined && balance !== null && parseFloat(balance) <= 0 && !msg.includes('balance')) {
+                                msg += ` (Account balance: ${balance} ${diag.accountBalance?.currency || ''})`;
+                            }
+                            
+                            setError(msg);
+                        })
+                        .catch(() => {
+                            setStatusMsg('');
+                            setError('Could not play this recording after several attempts. It may still be processing on Twilio, the recording was not saved, or the Twilio account is out of credit. Try again in a few minutes.');
+                        });
                 }
             };
             

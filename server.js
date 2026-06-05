@@ -3572,6 +3572,8 @@ app.post('/webhooks/sms-status', async (req, res) => {
 app.get('/health', (req, res) => {
     res.json({
         status: 'ok',
+        version: 'RECORDING-FIX-V3-2026',  // ← Verify this shows after deploy!
+        buildDate: '2026-recording-bulletproof',
         timestamp: new Date().toISOString(),
         twilio: !!twilioClient,
         twilioVideo: hasVideoApiKeys(),

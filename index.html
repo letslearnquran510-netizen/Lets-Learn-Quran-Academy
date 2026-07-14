@@ -942,13 +942,13 @@
         }
 
         const getInitials = (name) => {
-          if (!name) return '??';
+          if (!name || !String(name).trim()) return '??';
           if (name === "Administrator") return "AD";
-          const names = name.split(' ');
+          const names = String(name).trim().split(/\s+/).filter(Boolean);
           if (names.length > 1) {
             return `${names[0][0]}${names[names.length - 1][0]}`.toUpperCase();
           }
-          return name.substring(0, 2).toUpperCase();
+          return names[0].substring(0, 2).toUpperCase();
         }
 
         const generateColorFromName = (name) => {
@@ -1137,7 +1137,9 @@
             if (!isOpen) return null;
             
             const handleSave = () => {
-                if (!name || !phone) {
+                const cleanName = (name || '').trim().replace(/\s+/g, ' ');
+                const cleanParent = (parent || '').trim().replace(/\s+/g, ' ');
+                if (!cleanName || !phone) {
                     addToast('Name and phone are required!', 'error');
                     return;
                 }
@@ -1148,10 +1150,10 @@
                 }
 
                 onSave({
-                    name,
+                    name: cleanName,
                     phone: '+1' + cleanPhone,
-                    parent,
-                    email,
+                    parent: cleanParent,
+                    email: (email || '').trim(),
                     notes,
                 });
             };
@@ -3386,6 +3388,18 @@
                     console.log('Notification permission error:', e);
                 }
                 
+                // ADVANCED: Register Service Worker for OS-level persistent notifications
+                // These show even when browser is MINIMIZED or another app is in front
+                try {
+                    if ('serviceWorker' in navigator) {
+                        navigator.serviceWorker.register('/sw.js')
+                            .then(reg => console.log('🔔 Service Worker registered - persistent notifications enabled'))
+                            .catch(err => console.log('SW registration failed (notifications will use fallback):', err.message));
+                    }
+                } catch (e) {
+                    console.log('SW error:', e);
+                }
+                
                 // Set up the status update handler
                 wsManager.setStatusHandler((data) => {
                     console.log('📡 WebSocket status update:', data);
@@ -3503,23 +3517,42 @@
                         incomingCallAudioRef.current.play().catch(e => console.log('Backup audio prevented:', e));
                     } catch (e) {}
                     
-                    // 3. BROWSER NOTIFICATION (shows even when app minimized / other tab)
+                    // 3. BROWSER NOTIFICATION (shows even when app minimized / other tab / other app)
                     try {
                         if ('Notification' in window && Notification.permission === 'granted') {
-                            const notif = new Notification('📞 Incoming Call - Quran Academy', {
-                                body: `Call from ${call.callerName || 'Student'}`,
+                            const notifTitle = '📞 Incoming Call - Quran Academy';
+                            const notifOptions = {
+                                body: `Call from ${call.callerName || 'Student'} — Click to answer`,
                                 icon: 'https://cdn-icons-png.flaticon.com/512/455/455705.png',
                                 badge: 'https://cdn-icons-png.flaticon.com/512/455/455705.png',
                                 tag: 'incoming-call',
-                                requireInteraction: true, // Stays until user interacts
-                                renotify: true,
-                                vibrate: [300, 100, 300, 100, 300]
-                            });
-                            notif.onclick = () => {
-                                window.focus();
-                                notif.close();
+                                requireInteraction: true, // Stays on screen until user interacts
+                                silent: false
                             };
-                            incomingNotificationRef.current = notif;
+                            
+                            // ADVANCED METHOD: Service Worker persistent notification
+                            // Shows at OS level - works when minimized, other apps in front, other windows
+                            if ('serviceWorker' in navigator) {
+                                navigator.serviceWorker.ready.then(reg => {
+                                    return reg.showNotification(notifTitle, {
+                                        ...notifOptions,
+                                        renotify: true,
+                                        vibrate: [300, 100, 300, 100, 300] // vibrate IS supported in SW notifications
+                                    });
+                                }).catch(() => {
+                                    // Fallback: regular notification (NO vibrate - throws TypeError in Chrome constructor)
+                                    try {
+                                        const notif = new Notification(notifTitle, notifOptions);
+                                        notif.onclick = () => { window.focus(); notif.close(); };
+                                        incomingNotificationRef.current = notif;
+                                    } catch (e2) { console.error('Fallback notification error:', e2); }
+                                });
+                            } else {
+                                // No SW support: regular notification (safe options only)
+                                const notif = new Notification(notifTitle, notifOptions);
+                                notif.onclick = () => { window.focus(); notif.close(); };
+                                incomingNotificationRef.current = notif;
+                            }
                         }
                     } catch (e) {
                         console.error('Notification error:', e);
@@ -3568,6 +3601,15 @@
                         try { incomingNotificationRef.current.close(); } catch(e) {}
                         incomingNotificationRef.current = null;
                     }
+                    
+                    // Close Service Worker persistent notifications
+                    try {
+                        if ('serviceWorker' in navigator) {
+                            navigator.serviceWorker.ready.then(reg => 
+                                reg.getNotifications({ tag: 'incoming-call' }).then(list => list.forEach(n => n.close()))
+                            ).catch(() => {});
+                        }
+                    } catch(e) {}
                     
                     // Stop tab title flashing
                     if (titleFlashRef.current) {
@@ -3950,6 +3992,14 @@
                     try { incomingNotificationRef.current.close(); } catch(e) {}
                     incomingNotificationRef.current = null;
                 }
+                // Close Service Worker persistent notifications
+                try {
+                    if ('serviceWorker' in navigator) {
+                        navigator.serviceWorker.ready.then(reg => 
+                            reg.getNotifications({ tag: 'incoming-call' }).then(list => list.forEach(n => n.close()))
+                        ).catch(() => {});
+                    }
+                } catch(e) {}
                 // Stop tab title flashing
                 if (titleFlashRef.current) {
                     const orig = titleFlashRef.current.originalTitle;

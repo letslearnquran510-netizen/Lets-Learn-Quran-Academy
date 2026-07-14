@@ -3309,6 +3309,72 @@
             const [activeSection, setActiveSection] = useState(user.type === 'admin' ? 'overview' : 'students');
             const [isSidebarOpen, setSidebarOpen] = useState(false);
             
+            // Notification permission tracking - shows enable banner if not granted
+            const [notifPermission, setNotifPermission] = useState(
+                ('Notification' in window) ? Notification.permission : 'unsupported'
+            );
+            
+            // ROBUST OS notification sender: tries Service Worker (works minimized) with
+            // 2s timeout protection, falls back to regular Notification. Never hangs.
+            const showOSNotification = useCallback(async (title, options) => {
+                if (!('Notification' in window) || Notification.permission !== 'granted') return false;
+                // Attempt 1: Service Worker persistent notification (strongest - shows when minimized/other apps)
+                try {
+                    if ('serviceWorker' in navigator) {
+                        const reg = await Promise.race([
+                            navigator.serviceWorker.ready,
+                            new Promise((_, rej) => setTimeout(() => rej(new Error('sw-timeout')), 2000))
+                        ]);
+                        await reg.showNotification(title, { ...options, renotify: true, vibrate: [300, 100, 300, 100, 300] });
+                        return true;
+                    }
+                } catch (e) { /* SW unavailable - fall through to regular */ }
+                // Attempt 2: Regular notification (safe options only - no vibrate, throws in Chrome)
+                try {
+                    const notif = new Notification(title, options);
+                    notif.onclick = () => { window.focus(); notif.close(); };
+                    incomingNotificationRef.current = notif;
+                    return true;
+                } catch (e) {
+                    console.error('All notification methods failed:', e);
+                    return false;
+                }
+            }, []);
+            
+            // ENABLE NOTIFICATIONS - must be called from a USER CLICK
+            // (Firefox blocks permission prompts that aren't from a real click)
+            const enableNotifications = useCallback(async () => {
+                if (!('Notification' in window)) {
+                    addToast('This browser does not support notifications', 'error');
+                    return;
+                }
+                try {
+                    const permission = await Notification.requestPermission();
+                    setNotifPermission(permission);
+                    if (permission === 'granted') {
+                        // Register SW now that we have permission
+                        if ('serviceWorker' in navigator) {
+                            try { await navigator.serviceWorker.register('/sw.js'); } catch(e) {}
+                        }
+                        addToast('✅ Call notifications enabled!', 'success');
+                        // FIRE A TEST NOTIFICATION so the user SEES it working
+                        setTimeout(() => {
+                            showOSNotification('✅ Notifications Working!', {
+                                body: 'You will now see incoming call alerts like this — even when minimized.',
+                                icon: 'https://cdn-icons-png.flaticon.com/512/455/455705.png',
+                                tag: 'test-notification',
+                                requireInteraction: false
+                            });
+                        }, 500);
+                    } else if (permission === 'denied') {
+                        addToast('Notifications are blocked. Enable them in your browser settings (click the icon near the address bar).', 'error');
+                    }
+                } catch (e) {
+                    console.error('Permission request error:', e);
+                    addToast('Could not request notification permission', 'error');
+                }
+            }, [addToast, showOSNotification]);
+            
             // CRITICAL: Dedicated state for modal visibility - this is the ONLY thing that controls the modal
             const [showCallModal, setShowCallModal] = useState(false);
 
@@ -3374,15 +3440,16 @@
                 wsManager.connect();
                 wsManager.setUserType(user.type, user.name || user.email);
                 
-                // Request browser notification permission (for incoming call alerts when minimized)
+                // Try requesting notification permission (works in Chrome; Firefox requires the button click)
                 try {
                     if ('Notification' in window && Notification.permission === 'default') {
                         Notification.requestPermission().then(permission => {
                             console.log('🔔 Notification permission:', permission);
+                            setNotifPermission(permission);
                             if (permission === 'granted') {
                                 addToast('✅ Call notifications enabled', 'success');
                             }
-                        });
+                        }).catch(() => {});
                     }
                 } catch (e) {
                     console.log('Notification permission error:', e);
@@ -3517,46 +3584,16 @@
                         incomingCallAudioRef.current.play().catch(e => console.log('Backup audio prevented:', e));
                     } catch (e) {}
                     
-                    // 3. BROWSER NOTIFICATION (shows even when app minimized / other tab / other app)
-                    try {
-                        if ('Notification' in window && Notification.permission === 'granted') {
-                            const notifTitle = '📞 Incoming Call - Quran Academy';
-                            const notifOptions = {
-                                body: `Call from ${call.callerName || 'Student'} — Click to answer`,
-                                icon: 'https://cdn-icons-png.flaticon.com/512/455/455705.png',
-                                badge: 'https://cdn-icons-png.flaticon.com/512/455/455705.png',
-                                tag: 'incoming-call',
-                                requireInteraction: true, // Stays on screen until user interacts
-                                silent: false
-                            };
-                            
-                            // ADVANCED METHOD: Service Worker persistent notification
-                            // Shows at OS level - works when minimized, other apps in front, other windows
-                            if ('serviceWorker' in navigator) {
-                                navigator.serviceWorker.ready.then(reg => {
-                                    return reg.showNotification(notifTitle, {
-                                        ...notifOptions,
-                                        renotify: true,
-                                        vibrate: [300, 100, 300, 100, 300] // vibrate IS supported in SW notifications
-                                    });
-                                }).catch(() => {
-                                    // Fallback: regular notification (NO vibrate - throws TypeError in Chrome constructor)
-                                    try {
-                                        const notif = new Notification(notifTitle, notifOptions);
-                                        notif.onclick = () => { window.focus(); notif.close(); };
-                                        incomingNotificationRef.current = notif;
-                                    } catch (e2) { console.error('Fallback notification error:', e2); }
-                                });
-                            } else {
-                                // No SW support: regular notification (safe options only)
-                                const notif = new Notification(notifTitle, notifOptions);
-                                notif.onclick = () => { window.focus(); notif.close(); };
-                                incomingNotificationRef.current = notif;
-                            }
-                        }
-                    } catch (e) {
-                        console.error('Notification error:', e);
-                    }
+                    // 3. OS NOTIFICATION (shows even when app minimized / other tab / other app)
+                    // Uses Service Worker (strongest) with timeout protection + regular fallback
+                    showOSNotification('📞 Incoming Call - Quran Academy', {
+                        body: `Call from ${call.callerName || 'Student'} — Click to answer`,
+                        icon: 'https://cdn-icons-png.flaticon.com/512/455/455705.png',
+                        badge: 'https://cdn-icons-png.flaticon.com/512/455/455705.png',
+                        tag: 'incoming-call',
+                        requireInteraction: true, // Stays on screen until user interacts
+                        silent: false
+                    });
                     
                     // 4. VIBRATE on mobile devices
                     try {
@@ -4513,6 +4550,32 @@
                                 darkMode={darkMode}
                                 toggleDarkMode={toggleDarkMode}
                             />
+                            {/* NOTIFICATION ENABLE BANNER - shows until permission granted */}
+                            {(user.type === 'admin' || user.type === 'teamlead') && notifPermission === 'default' && (
+                                <div className="mt-4 p-4 rounded-xl border-2 border-amber-400 bg-amber-50 dark:bg-amber-900/30 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 animate-fade-in">
+                                    <div className="flex items-center gap-3">
+                                        <span className="text-3xl">🔔</span>
+                                        <div>
+                                            <p className={`font-bold ${darkMode ? 'text-amber-300' : 'text-amber-800'}`}>Enable Call Notifications</p>
+                                            <p className={`text-sm ${darkMode ? 'text-amber-400/80' : 'text-amber-700'}`}>Click the button to get incoming call popups — even when this window is minimized or you're in another app.</p>
+                                        </div>
+                                    </div>
+                                    <button onClick={enableNotifications} className="px-5 py-2.5 bg-amber-500 hover:bg-amber-600 text-white font-bold rounded-lg whitespace-nowrap shadow transition-colors">
+                                        🔔 Enable Now
+                                    </button>
+                                </div>
+                            )}
+                            {(user.type === 'admin' || user.type === 'teamlead') && notifPermission === 'denied' && (
+                                <div className="mt-4 p-4 rounded-xl border-2 border-red-400 bg-red-50 dark:bg-red-900/30 flex items-start gap-3 animate-fade-in">
+                                    <span className="text-3xl">🚫</span>
+                                    <div>
+                                        <p className={`font-bold ${darkMode ? 'text-red-300' : 'text-red-800'}`}>Call Notifications are BLOCKED by your browser</p>
+                                        <p className={`text-sm mt-1 ${darkMode ? 'text-red-400/80' : 'text-red-700'}`}>
+                                            You won't see incoming call popups when minimized. To fix: click the <b>🔒 / shield icon</b> next to the address bar → find <b>Notifications</b> → change to <b>Allow</b> → then refresh this page.
+                                        </p>
+                                    </div>
+                                </div>
+                            )}
                             <div className="mt-6">
                                 {renderSection()}
                             </div>

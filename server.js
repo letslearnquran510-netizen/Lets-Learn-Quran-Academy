@@ -100,6 +100,40 @@ app.get('/', (req, res) => {
     res.sendFile(path.join(__dirname, 'index.html'));
 });
 
+// SERVICE WORKER - enables persistent OS-level notifications that show
+// even when the browser is minimized or another app is in front
+app.get('/sw.js', (req, res) => {
+    res.type('application/javascript');
+    res.set('Cache-Control', 'no-cache');
+    res.send(`
+// Quran Academy Service Worker - Incoming Call Notifications
+self.addEventListener('install', (event) => {
+    self.skipWaiting();
+});
+
+self.addEventListener('activate', (event) => {
+    event.waitUntil(clients.claim());
+});
+
+// When user clicks the notification - focus the app window (or open it)
+self.addEventListener('notificationclick', (event) => {
+    event.notification.close();
+    event.waitUntil(
+        clients.matchAll({ type: 'window', includeUncontrolled: true }).then((clientList) => {
+            for (const client of clientList) {
+                if ('focus' in client) {
+                    return client.focus();
+                }
+            }
+            if (clients.openWindow) {
+                return clients.openWindow('/');
+            }
+        })
+    );
+});
+`);
+});
+
 // Serve video-room.html for student video calls
 app.get('/video-room.html', (req, res) => {
     res.sendFile(path.join(__dirname, 'video-room.html'));

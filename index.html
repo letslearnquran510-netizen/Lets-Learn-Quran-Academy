@@ -3375,6 +3375,93 @@
                 }
             }, [addToast, showOSNotification]);
             
+            // ============================================================
+            // ZOOM-STYLE ALWAYS-ON-TOP CALL MONITOR (Document Picture-in-Picture)
+            // Creates a real floating window that stays ON TOP of ALL apps -
+            // even when the browser is minimized or you work in another program.
+            // Supported: Chrome/Edge 116+. (Firefox does not support this API.)
+            // ============================================================
+            const [pipOpen, setPipOpen] = useState(false);
+            const pipWindowRef = useRef(null);
+            const answerCallFnRef = useRef(null);
+            const rejectCallFnRef = useRef(null);
+            const pipSupported = ('documentPictureInPicture' in window);
+            
+            // Render the idle (waiting) state inside the PiP window
+            const renderPipIdle = useCallback((pipWin) => {
+                if (!pipWin || pipWin.closed) return;
+                pipWin.document.body.innerHTML = `
+                    <div style="height:100%;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:10px;font-family:system-ui,sans-serif;background:#0f172a;color:#e2e8f0;margin:0;">
+                        <div style="font-size:34px;">📞</div>
+                        <div style="font-weight:700;font-size:15px;">Call Monitor Active</div>
+                        <div style="font-size:12px;color:#4ade80;display:flex;align-items:center;gap:6px;">
+                            <span style="width:8px;height:8px;background:#4ade80;border-radius:50%;display:inline-block;animation:pulse 1.5s infinite;"></span>
+                            Waiting for incoming calls...
+                        </div>
+                        <div style="font-size:10px;color:#64748b;text-align:center;padding:0 10px;">This window stays on top of all apps.<br/>Keep it open to never miss a call.</div>
+                    </div>
+                    <style>@keyframes pulse{0%,100%{opacity:1}50%{opacity:0.3}} body{margin:0;height:100vh;}</style>
+                `;
+            }, []);
+            
+            // Render the INCOMING CALL state - big Accept/Decline like Zoom
+            const renderPipIncoming = useCallback((pipWin, call) => {
+                if (!pipWin || pipWin.closed) return;
+                const callerName = (call.callerName || 'Student').replace(/[<>]/g, '');
+                pipWin.document.body.innerHTML = `
+                    <div style="height:100%;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:8px;font-family:system-ui,sans-serif;background:linear-gradient(135deg,#0f172a,#1e3a5f);color:white;margin:0;animation:flash 1s infinite;">
+                        <div style="font-size:11px;color:#93c5fd;letter-spacing:2px;font-weight:700;">📞 INCOMING CALL</div>
+                        <div style="width:54px;height:54px;background:#3b82f6;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:24px;animation:ring 0.5s infinite;">👤</div>
+                        <div style="font-weight:800;font-size:17px;text-align:center;padding:0 8px;">${callerName}</div>
+                        <div style="display:flex;gap:14px;margin-top:6px;">
+                            <button id="pip-accept" style="width:52px;height:52px;border-radius:50%;border:none;background:#22c55e;color:white;font-size:22px;cursor:pointer;box-shadow:0 4px 14px rgba(34,197,94,0.5);">✓</button>
+                            <button id="pip-decline" style="width:52px;height:52px;border-radius:50%;border:none;background:#ef4444;color:white;font-size:22px;cursor:pointer;box-shadow:0 4px 14px rgba(239,68,68,0.5);">✕</button>
+                        </div>
+                        <div style="font-size:10px;color:#94a3b8;">Accept &nbsp;&nbsp;&nbsp;&nbsp;&nbsp; Decline</div>
+                    </div>
+                    <style>@keyframes flash{0%,100%{filter:brightness(1)}50%{filter:brightness(1.25)}} @keyframes ring{0%,100%{transform:rotate(-12deg)}50%{transform:rotate(12deg)}} body{margin:0;height:100vh;}</style>
+                `;
+                const acceptBtn = pipWin.document.getElementById('pip-accept');
+                const declineBtn = pipWin.document.getElementById('pip-decline');
+                if (acceptBtn) acceptBtn.addEventListener('click', () => {
+                    try { window.focus(); } catch(e) {}
+                    if (answerCallFnRef.current) answerCallFnRef.current();
+                    renderPipIdle(pipWin);
+                });
+                if (declineBtn) declineBtn.addEventListener('click', () => {
+                    if (rejectCallFnRef.current) rejectCallFnRef.current('declined');
+                    renderPipIdle(pipWin);
+                });
+            }, [renderPipIdle]);
+            
+            // Open the always-on-top Call Monitor (requires user click - browser rule)
+            const openCallMonitor = useCallback(async () => {
+                if (!pipSupported) {
+                    addToast('Always-on-top Call Monitor requires Chrome or Edge browser. On this browser, OS notifications will be used instead.', 'info');
+                    return false;
+                }
+                if (pipWindowRef.current && !pipWindowRef.current.closed) {
+                    addToast('Call Monitor is already open', 'info');
+                    return true;
+                }
+                try {
+                    const pipWin = await window.documentPictureInPicture.requestWindow({ width: 320, height: 230 });
+                    pipWindowRef.current = pipWin;
+                    setPipOpen(true);
+                    renderPipIdle(pipWin);
+                    pipWin.addEventListener('pagehide', () => {
+                        pipWindowRef.current = null;
+                        setPipOpen(false);
+                    });
+                    addToast('✅ Call Monitor opened - it stays on top of all apps!', 'success');
+                    return true;
+                } catch (e) {
+                    console.error('Call Monitor error:', e);
+                    addToast('Could not open Call Monitor: ' + e.message, 'error');
+                    return false;
+                }
+            }, [pipSupported, addToast, renderPipIdle]);
+            
             // CRITICAL: Dedicated state for modal visibility - this is the ONLY thing that controls the modal
             const [showCallModal, setShowCallModal] = useState(false);
 
@@ -3566,6 +3653,14 @@
                     console.log('📞 INCOMING CALL RECEIVED:', call);
                     setIncomingCall(call);
                     
+                    // 0. ZOOM-STYLE POPUP: Show incoming call in the always-on-top Call Monitor
+                    // This floats ABOVE all apps - even when browser is minimized!
+                    try {
+                        if (pipWindowRef.current && !pipWindowRef.current.closed) {
+                            renderPipIncoming(pipWindowRef.current, call);
+                        }
+                    } catch(e) { console.error('PiP update error:', e); }
+                    
                     // 1. LOUD PROFESSIONAL RINGTONE (Web Audio - always works)
                     try {
                         audioManager.playIncomingRing();
@@ -3645,6 +3740,13 @@
                             navigator.serviceWorker.ready.then(reg => 
                                 reg.getNotifications({ tag: 'incoming-call' }).then(list => list.forEach(n => n.close()))
                             ).catch(() => {});
+                        }
+                    } catch(e) {}
+                    
+                    // Revert Call Monitor to idle state
+                    try {
+                        if (pipWindowRef.current && !pipWindowRef.current.closed) {
+                            renderPipIdle(pipWindowRef.current);
                         }
                     } catch(e) {}
                     
@@ -4126,6 +4228,12 @@
                 setIsAnsweringCall(false);
             }, [incomingCall, addToast]);
             
+            // Keep PiP Call Monitor buttons wired to the LATEST answer/reject handlers
+            useEffect(() => {
+                answerCallFnRef.current = handleAnswerIncomingCall;
+                rejectCallFnRef.current = handleRejectIncomingCall;
+            }, [handleAnswerIncomingCall, handleRejectIncomingCall]);
+            
             // Hangup active incoming voice call
             const handleHangupIncomingCall = useCallback(() => {
                 twilioVoiceManager.hangup();
@@ -4574,6 +4682,32 @@
                                             You won't see incoming call popups when minimized. To fix: click the <b>🔒 / shield icon</b> next to the address bar → find <b>Notifications</b> → change to <b>Allow</b> → then refresh this page.
                                         </p>
                                     </div>
+                                </div>
+                            )}
+                            {/* ZOOM-STYLE CALL MONITOR BAR - always-on-top floating call window */}
+                            {(user.type === 'admin' || user.type === 'teamlead') && pipSupported && !pipOpen && (
+                                <div className="mt-4 p-4 rounded-xl border-2 border-emerald-400 bg-emerald-50 dark:bg-emerald-900/30 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 animate-fade-in">
+                                    <div className="flex items-center gap-3">
+                                        <span className="text-3xl">🖥️</span>
+                                        <div>
+                                            <p className={`font-bold ${darkMode ? 'text-emerald-300' : 'text-emerald-800'}`}>Open Always-On-Top Call Popup (like Zoom)</p>
+                                            <p className={`text-sm ${darkMode ? 'text-emerald-400/80' : 'text-emerald-700'}`}>A floating window that stays ABOVE all apps — incoming calls show Accept/Decline right on top of whatever you're working in.</p>
+                                        </div>
+                                    </div>
+                                    <button onClick={openCallMonitor} className="px-5 py-2.5 bg-emerald-500 hover:bg-emerald-600 text-white font-bold rounded-lg whitespace-nowrap shadow transition-colors">
+                                        📞 Open Call Monitor
+                                    </button>
+                                </div>
+                            )}
+                            {(user.type === 'admin' || user.type === 'teamlead') && pipSupported && pipOpen && (
+                                <div className={`mt-4 px-4 py-2 rounded-lg border flex items-center gap-2 text-sm ${darkMode ? 'border-emerald-700 bg-emerald-900/20 text-emerald-300' : 'border-emerald-300 bg-emerald-50 text-emerald-700'}`}>
+                                    <span className="w-2 h-2 bg-emerald-500 rounded-full animate-pulse inline-block"></span>
+                                    Call Monitor active — incoming calls will pop up on top of all apps
+                                </div>
+                            )}
+                            {(user.type === 'admin' || user.type === 'teamlead') && !pipSupported && (
+                                <div className={`mt-4 px-4 py-2 rounded-lg border text-sm ${darkMode ? 'border-slate-600 bg-slate-800 text-slate-400' : 'border-slate-300 bg-slate-100 text-slate-600'}`}>
+                                    💡 For Zoom-style on-top call popups, open this app in <b>Google Chrome</b> or <b>Microsoft Edge</b>. On this browser, OS notifications are used instead.
                                 </div>
                             )}
                             <div className="mt-6">
